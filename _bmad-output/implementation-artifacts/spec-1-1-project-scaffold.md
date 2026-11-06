@@ -4,7 +4,7 @@ type: 'chore'
 created: '2026-11-06'
 status: 'done'
 route: 'dispatch'
-review_loop_iteration: 0
+review_loop_iteration: 1
 baseline_commit: 151d55cf8b656295e42dbe3ff159ad507768b66e
 context:
   - _bmad-output/planning-artifacts/architecture/architecture-my_project-2026-11-05/architecture.md
@@ -86,6 +86,31 @@ context:
 - `low` → patch — MEDIA_URL="media/" 缺前导斜杠（已修为 "/media/"）。证据：Django 文档约定 "/media/"；缺斜杠时非根路径页面 {{ MEDIA_URL }} 会解析为相对路径。
 - `low` → patch — requirements.txt 版本锁定未被任何校验命令覆盖（verification-gap 主发现，预验证）。证据：check/migrate/assert 均不触碰 requirements.txt，锁定可静默漂移；已在 Verification 增加版本断言命令。
 
+
+### Review Findings (2026-11-06)
+
+#### patch
+
+- [x] [Review][Patch] SECRET_KEY 空字符串边界处理 [config/settings.py:24] — `os.environ.get("DJANGO_SECRET_KEY", "...")` 在环境变量设为空字符串时返回 `""`，Django 会抛出 ImproperlyConfigured。应改用 `os.environ.get("DJANGO_SECRET_KEY") or "..."`。
+- [x] [Review][Patch] requirements.txt 版本锁定缺少文件级校验命令 [requirements.txt] — 所有验证命令均检查已安装包版本而非已提交文件内容。编辑 `requirements.txt` 为 `Django==6.0.4` 后全部 4 条验证命令仍通过，AC「requirements.txt 锁定 Django 5.2 LTS」可被静默违反。需增加直接解析 `requirements.txt` 的校验。
+
+#### defer
+
+- [x] [Review][Defer] 规划文档中硬编码绝对 Windows 路径 — deferred: BMad 工具链生成工件（`deferred-work.md`、`sprint-status.yaml`、`spec-1-1` 的 context 元数据），非应用代码。
+- [x] [Review][Defer] `epic-1-context.md` 与 spec Code Map 中 Python 版本不一致 — deferred: 规划文档不一致（3.14 vs 3.13.1），无代码影响。
+- [x] [Review][Defer] `.gitignore` 缺少跨平台条目（`.env`、`.vscode/`、`.idea/`、`*.log`、`.DS_Store`） — deferred: 次要代码卫生问题。
+
+#### Rejected
+
+- `requirements.txt` 缺少 hash/锁文件: `false` — spec 不要求，课堂演示范围（AD-10）
+- `ALLOWED_HOSTS = []` 缺少注释: `low` rejected — AD-10 明确单机演示，危害可能性极低且修复超过简单注释
+- `config/urls.py` 未预留 app 路由: `false` — app 尚无视图，添加 `include` 会导致 ImportError
+- `config/asgi.py` 与 AD-7 冲突: `false` — 标准 Django 骨架，`WSGI_APPLICATION` 指向 `wsgi.py`，`asgi.py` 未被使用
+- 缺少 `base.html`/Bootstrap 静态资源: `false` — spec 明确只建目录骨架，UI 属 story 1.2+
+- `LOGIN_URL`/`LOGIN_REDIRECT_URL` 未配置: `false` — 登录 URL 尚不存在，过早配置
+- spec Code Map 路由策略: rejected — 修复会编辑被审查的 spec 本身
+
+
 ## Verification
 
 **Commands:**
@@ -93,3 +118,4 @@ context:
 - `python manage.py migrate` -- expected: 应用全部初始迁移、无报错、生成 `db.sqlite3`
 - `python -c "import os,django; os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings'); django.setup(); from django.conf import settings; assert set(['accounts','listings','chat','orders','dashboard']).issubset(settings.INSTALLED_APPS) and settings.USE_TZ is True"` -- expected: 无异常退出
 - `python -c "import django, PIL; assert django.get_version().startswith('5.2'), django.get_version(); assert PIL.__version__.startswith('13.0'), PIL.__version__; print('VERSIONS_OK', django.get_version(), PIL.__version__)"` -- expected: 输出 VERSIONS_OK 且 Django 5.2.x、Pillow 13.0.x
+- `python -c "import re; r = open('requirements.txt').read(); assert re.search(r'^Django==5\.2\.\d+', r, re.M), 'Django pin missing/wrong'; assert re.search(r'^Pillow==13\.0\.\d+', r, re.M), 'Pillow pin missing/wrong'; print('DEPS_FILE_OK')"` -- expected: 输出 DEPS_FILE_OK（校验已提交 requirements.txt 内容）

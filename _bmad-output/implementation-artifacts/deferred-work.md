@@ -13,3 +13,14 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-1-project-scaffold.md`
   summary: 本地化 — LANGUAGE_CODE 改为 zh-hans（中文项目）。
   evidence: TIME_ZONE=UTC 正确（架构要求）；LANGUAGE_CODE=en-us 为外观项，可后续调整。
+
+## Deferred from: code review of spec-1-1-project-scaffold (2026-11-06)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-1-project-scaffold.md`
+  summary: 规划文档中硬编码绝对 Windows 路径 — BMad 工具链生成工件（deferred-work.md、sprint-status.yaml、spec-1-1 的 context 元数据），非应用代码。
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-1-project-scaffold.md`
+  summary: epic-1-context.md 与 spec Code Map 中 Python 版本不一致（Python 3.14 vs 3.13.1） — 规划文档不一致，无代码影响。
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-1-project-scaffold.md`
+  summary: .gitignore 缺少跨平台条目（.env、.vscode/、.idea/、*.log、.DS_Store） — 次要代码卫生问题。

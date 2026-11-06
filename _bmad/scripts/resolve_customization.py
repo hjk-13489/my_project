@@ -51,7 +51,11 @@ def script_project_root() -> Path | None:
     resolved.
     """
     parents = Path(__file__).resolve().parents
-    if len(parents) >= 3 and parents[0].name == "scripts" and parents[1].name == "_bmad":
+    if (
+        len(parents) >= 3
+        and parents[0].name == "scripts"
+        and parents[1].name == "_bmad"
+    ):
         return parents[2]
     return None
 
@@ -82,7 +86,9 @@ def has_override(root: Path, skill_name: str) -> bool:
     )
 
 
-def warn_on_masked_override(chosen: Path, rejected: list[Path], skill_name: str) -> None:
+def warn_on_masked_override(
+    chosen: Path, rejected: list[Path], skill_name: str
+) -> None:
     """Break the silence when a real override exists under a root we did not pick."""
     if has_override(chosen, skill_name):
         return

@@ -37,7 +37,7 @@ story_location:
   C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts
 development_status:
   epic-1: in-progress
-  1-1-项目脚手架-django-分层单体初始化: review
+  1-1-项目脚手架-django-分层单体初始化: done
   1-2-用户注册: backlog
   1-3-登录与登出: backlog
   1-4-学号身份认证-用户提交: backlog
