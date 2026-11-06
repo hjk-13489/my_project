@@ -1,5 +1,7 @@
 from django.test import TestCase
 from django.urls import reverse
+from django.db import IntegrityError
+from unittest.mock import patch
 from accounts.models import User
 
 
@@ -105,3 +107,29 @@ class RegisterViewTests(TestCase):
         self.client.login(username='admin001', password='adminpass123')
         response = self.client.get(reverse('admin:accounts_user_changelist'))
         self.assertEqual(response.status_code, 200)
+
+    def test_integrity_error_during_save_shows_student_id_error(self):
+        """user.save() 抛出 IntegrityError（student_id 重复）时应返回表单错误"""
+        with patch('accounts.models.User.save', side_effect=IntegrityError('student_id')):
+            response = self.client.post(self.register_url, self.valid_data)
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, '该学号已被注册')
+
+    def test_integrity_error_during_save_shows_username_error(self):
+        """user.save() 抛出 IntegrityError（username 重复）时应返回昵称相关错误"""
+        with patch('accounts.models.User.save', side_effect=IntegrityError('username')):
+            response = self.client.post(self.register_url, self.valid_data)
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, '该昵称已被使用')
+
+    def test_home_page_verified_user(self):
+        """已认证用户访问首页应显示已通过认证"""
+        user = User.objects.create_user(
+            student_id='v001', username='verified_user', password='pass123456'
+        )
+        user.is_verified = True
+        user.save()
+        self.client.login(username='v001', password='pass123456')
+        response = self.client.get(self.home_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '你的账号已通过认证')

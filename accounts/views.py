@@ -15,8 +15,11 @@ def register(request):
             user.set_password(form.cleaned_data['password'])
             try:
                 user.save()
-            except IntegrityError:
-                form.add_error('student_id', '该学号已被注册')
+            except IntegrityError as e:
+                if 'student_id' in str(e):
+                    form.add_error('student_id', '该学号已被注册')
+                else:
+                    form.add_error('username', '该昵称已被使用')
                 return render(request, 'accounts/register.html', {'form': form})
             login(request, user)
             return redirect('home')

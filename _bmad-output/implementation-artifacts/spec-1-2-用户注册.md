@@ -5,7 +5,7 @@ created: '2026-11-06'
 status: 'done'
 baseline_commit: 261485671001e8230a59b1c4000b5f8a04b1ef5d
 route: 'dispatch'
-review_loop_iteration: 0
+review_loop_iteration: 1
 context:
   - _bmad-output/implementation-artifacts/epic-1-context.md
   - _bmad-output/planning-artifacts/epics.md
@@ -106,6 +106,15 @@ context:
 - `false` — Edge Case Hunter: spec 说密码校验在 `clean()` 中，代码在 `clean_password()` 中。证：两者同属表单校验流程，功能正确。修复只需编辑 spec 文字，规则要求拒绝"fix is to edit this build's spec"的发现。
 - `low` → patch → fixed — Verification Gap: Admin 配置无测试覆盖。已添加 `test_admin_user_changelist` 验证 admin changelist 渲染。
 - `low` → patch → fixed — Verification Gap: 首页未登录分支无测试覆盖。已添加 `test_home_page_unauthenticated` 验证未登录首页渲染。
+- `low` → patch → fixed — Blind Hunter + Edge Case Hunter: `IntegrityError` 捕获过宽（`accounts/views.py:18-19`）。修复：检查异常字符串区分 `student_id`/`username` 约束冲突，分别返回正确的中文错误提示。
+- `false` — Blind Hunter: `clean_password` 缺少 None 守卫（`accounts/forms.py:37`）。Django 表单引擎仅在 `required` 校验通过后才调用 `clean_password`，此时 password 必定为非空字符串，`len(None)` 场景不可达。
+- `false` — Blind Hunter: `UserManager.create_user()` 被绕过导致缺少 NFKC 规范化（`accounts/views.py:14-17`）。`CharField.strip=True` 已处理空白字符，学生号为 ASCII 数字，NFKC 规范化无实际影响；修复需要重构视图保存逻辑，增加复杂度不划算。
+- `low` → patch → fixed — Blind Hunter: 两个 `path("", ...)` 路由项排序依赖（`config/urls.py:29-30`）。修复：`path("", home)` 前置，`path("", include("accounts.urls"))` 后置，确保 home 视图不会被未来 accounts 根路由静默覆盖。
+- `medium` → patch → fixed — Blind Hunter + Edge Case Hunter + Acceptance Auditor: `username` 唯一约束冲突时显示英文默认错误（`accounts/forms.py:31-33`）。修复：添加 `'username': {'unique': '该昵称已被使用'}` 到 `error_messages`。
+- `low` → patch → fixed — Blind Hunter: admin `list_display` 中 `role` 显示原始值（`accounts/admin.py:8`）。修复：`'role'` → `'get_role_display'`。
+- `low` → defer — Blind Hunter: 导航栏中存在死链接（登录/退出 `href="#"`，`templates/base.html:16,19`）。登录/登出属 story 1.3，占位链接预期在该 story 中激活。
+- `medium` → patch → fixed — Edge Case Hunter + Verification Gap: `IntegrityError` 处理块无测试覆盖（`accounts/views.py:18-20`）。修复：添加 `test_integrity_error_during_save_shows_student_id_error` 和 `test_integrity_error_during_save_shows_username_error` 测试。
+- `low` → patch → fixed — Edge Case Hunter + Verification Gap: 首页已认证用户分支无测试覆盖（`templates/index.html:14-17`）。修复：添加 `test_home_page_verified_user` 测试。
 
 ## Design Notes
 

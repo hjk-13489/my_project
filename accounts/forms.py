@@ -30,6 +30,7 @@ class RegisterForm(forms.ModelForm):
             },
             'username': {
                 'required': '请输入昵称',
+                'unique': '该昵称已被使用',
             },
         }
 

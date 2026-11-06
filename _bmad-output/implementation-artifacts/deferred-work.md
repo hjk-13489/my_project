@@ -24,3 +24,8 @@
 
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-1-project-scaffold.md`
   summary: .gitignore 缺少跨平台条目（.env、.vscode/、.idea/、*.log、.DS_Store） — 次要代码卫生问题。
+
+## Deferred from: code review of spec-1-2-用户注册 (2026-11-06)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-2-用户注册.md`
+  summary: 导航栏中存在死链接（登录/退出 `href="#"`） — 登录/登出功能属 story 1.3，占位链接预期在该 story 中激活。

@@ -1,0 +1,775 @@
+diff --git "a/_bmad-output/implementation-artifacts/spec-1-2-\347\224\250\346\210\267\346\263\250\345\206\214.md" "b/_bmad-output/implementation-artifacts/spec-1-2-\347\224\250\346\210\267\346\263\250\345\206\214.md"
+new file mode 100644
+index 0000000..47330dc
+--- /dev/null
++++ "b/_bmad-output/implementation-artifacts/spec-1-2-\347\224\250\346\210\267\346\263\250\345\206\214.md"
+@@ -0,0 +1,142 @@
++---
++title: '用户注册'
++type: 'feature'
++created: '2026-11-06'
++status: 'done'
++baseline_commit: 261485671001e8230a59b1c4000b5f8a04b1ef5d
++route: 'dispatch'
++review_loop_iteration: 0
++context:
++  - _bmad-output/implementation-artifacts/epic-1-context.md
++  - _bmad-output/planning-artifacts/epics.md
++---
++
++<frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
++
++## Intent
++
++**Problem:** 学生无法获得账号身份——系统中尚无注册功能，所有后续操作（登录、认证、发布、交易）都需要一个已存在的 User 记录作为身份锚点。
++
++**Approach:** 在 `accounts` app 中定义自定义 User 模型（`student_id` 唯一、`is_verified` 默认 False、`role` 默认 `'student'`），创建注册表单（学号 + 密码 ≥6 位 + 昵称），实现注册视图（GET 渲染表单 / POST 校验并创建用户），配置 `AUTH_USER_MODEL` 并在首次 migrate 前完成，删除旧的 `db.sqlite3` 重迁移。
++
++## Boundaries & Constraints
++
++**Always:**
++- 自定义 User 模型继承 `AbstractUser`，扩展字段：`student_id`（CharField，unique）、`is_verified`（BooleanField，default=False）、`role`（CharField，choices=[('student', '学生'), ('admin', '管理员')]，default='student'）。
++- `AUTH_USER_MODEL = 'accounts.User'` 必须在 `settings.py` 中设置，且在首次 migrate 之前生效。
++- 密码哈希加盐由 Django 默认 PBKDF2 处理（AD-3），不自行实现加密。
++- 注册表单字段：学号（`student_id`）、密码（`password`，≥6 位）、确认密码（`password_confirm`）、昵称（`nickname`，即 `User.username`）。后端校验所有字段。
++- 学号唯一性在 model 层（`unique=True`）和表单层双重保证。
++- 注册成功后 `is_verified=False`、`role='student'`，自动登录（`login(request, user)`）并跳转首页，首页显示「待认证」状态提示。
++- 页面使用 Django 模板 + Bootstrap 5.3（CDN），服务端渲染（AD-1）。
++- 语言：所有用户可见文本使用中文。
++
++**Never:**
++- 不在注册时做学号格式校验（如限定学校前缀/数字长度）——仅做非空校验。格式校验属 story 1.4（学号认证）。
++- 不实现邮箱/手机验证、验证码、第三方登录。
++- 不实现登录功能（属 story 1.3）。
++- 不实现认证审核（属 story 1.4）。
++- 不引入 Django REST Framework 或任何 API 端点。
++- 不引入前端构建链（Webpack/Vite）。
++
++## I/O & Edge-Case Matrix
++
++| 场景 | 输入 / 状态 | 预期输出 / 行为 | 错误处理 |
++|------|------------|---------------|---------|
++| 正常注册 | 新学号 + 密码(≥6位) + 确认密码一致 + 昵称 | 创建 User，`is_verified=False`, `role='student'`，自动登录并跳转至首页，首页显示「待认证」状态提示 | N/A |
++| 学号重复 | 已存在的学号 | 拒绝创建，表单错误提示「该学号已被注册」 | 返回表单页，保留已填写字段（密码除外） |
++| 密码过短 | 密码 < 6 位 | 拒绝，表单错误提示「密码长度不能少于 6 位」 | 返回表单页 |
++| 确认密码不一致 | password ≠ password_confirm | 拒绝，表单错误提示「两次输入的密码不一致」 | 返回表单页 |
++| 学号为空 | 学号留空提交 | 拒绝，表单错误提示「请输入学号」 | 返回表单页 |
++| 昵称为空 | 昵称留空提交 | 拒绝，表单错误提示「请输入昵称」 | 返回表单页 |
++| 已登录用户访问注册页 | 已有活跃 Session | 重定向至首页，不展示注册表单 | HTTP 302 → 首页 |
++
++</frozen-after-approval>
++
++## Code Map
++
++- `config/settings.py:134` -- 当前无 `AUTH_USER_MODEL`。需在 `DEFAULT_AUTO_FIELD` 之前添加 `AUTH_USER_MODEL = "accounts.User"`。
++- `accounts/models.py` -- 空文件，需创建自定义 `User(AbstractUser)` 模型。关键字段：`student_id`、`is_verified`、`role`。`username` 重用为昵称字段（Django 自带，不作改动）。
++- `accounts/forms.py` -- 空文件，需创建 `RegisterForm`，校验密码长度（≥6）、确认密码一致性、学号唯一。
++- `accounts/views.py` -- 目前仅含 `render` 导入。需添加 `register` 视图（FBV：GET 渲染表单，POST 校验并创建用户）。
++- `accounts/urls.py` -- 空文件，需添加 `path('register/', ...)` 路由。
++- `config/urls.py:22` -- 当前仅 admin 路由。需添加 `path('', include('accounts.urls'))` 或带前缀的 include。
++- `templates/base.html` -- 不存在，需创建含 Bootstrap 5.3 CDN 的基础模板。
++- `templates/accounts/register.html` -- 不存在，需创建注册表单模板（继承 base.html）。
++- `templates/index.html` -- 不存在（首页模板），需创建简单首页用于注册后跳转。
++- `accounts/tests.py` -- 目前仅含 `TestCase` 导入。需添加注册视图测试。
++- `accounts/admin.py` -- 需注册自定义 User 模型到 Django Admin。
++- `accounts/apps.py:4-7` -- `AccountsConfig` 已定义，可能需添加 `verbose_name`。当前无需改动。
++- `db.sqlite3`（如有）-- 需删除后重新 migrate（因为 AUTH_USER_MODEL 变更）。
++
++## Tasks & Acceptance
++
++**Execution:**
++- [x] `accounts/models.py` -- 定义 `User(AbstractUser)` 模型，添加 `student_id`（CharField, unique）、`is_verified`（BooleanField, default=False）、`role`（CharField, choices, default='student'）字段；设置 `USERNAME_FIELD='student_id'`、`REQUIRED_FIELDS=['username']` -- 建立用户数据模型，所有后续故事依赖此模型
++- [x] `accounts/admin.py` -- 注册自定义 User 模型 -- 使管理员可通过 Django Admin 管理用户
++- [x] `config/settings.py` -- 添加 `AUTH_USER_MODEL = "accounts.User"` -- 告知 Django 使用自定义 User 模型（在首次 migrate 前必须设置）
++- [x] `accounts/forms.py` -- 创建 `RegisterForm(ModelForm)`，包含 `password` 和 `password_confirm` 字段，`clean()` 校验密码长度 ≥6 和确认密码一致性 -- 实现注册表单校验逻辑
++- [x] `accounts/views.py` -- 实现 `register` 视图：GET 渲染注册表单，POST 校验并创建用户（`user.set_password()`），`login(request, user)` 自动登录，重定向至首页 -- 处理注册请求的核心逻辑
++- [x] `templates/base.html` -- 创建基础模板，引入 Bootstrap 5.3 CDN（CSS + JS），定义 `{% block content %}` 区块 -- 提供统一的前端框架
++- [x] `templates/accounts/register.html` -- 创建注册页面模板（继承 base.html），渲染学号/密码/确认密码/昵称输入框，显示表单错误 -- 注册表单的前端呈现
++- [x] `templates/index.html` -- 创建首页模板（继承 base.html），显示「待认证」状态提示（当 `user.is_authenticated and not user.is_verified` 时）-- 注册后跳转目标页，满足 AC「页面状态显示待认证」
++- [x] `accounts/urls.py` -- 添加 `path('register/', views.register, name='register')` 路由 -- 注册页面的 URL 映射
++- [x] `config/urls.py` -- 添加首页视图路由和 accounts URL 引入 -- 将 accounts 的路由接入项目
++- [x] `accounts/tests.py` -- 添加注册视图测试：正常注册、学号重复拒绝、密码过短拒绝、确认密码不一致拒绝、学号/昵称为空拒绝 -- 验证所有 AC 和边界条件
++
++**Acceptance Criteria:**
++- Given 注册表单已呈现，When 输入学号、密码（≥6位）、昵称并提交，Then 创建 `User` 记录且 `is_verified=False`、`role='student'`，页面状态显示「待认证」
++- And 重复学号提交被拒绝并提示
++- And 密码长度 < 6 位被拒绝
++
++## Implementation Notes
++
++## Spec Change Log
++
++## Review Triage Log
++
++- `false` — Blind Hunter: 无 email 字段导致密码重置不可行。证据：spec 明确排除邮箱验证（Never:"不实现邮箱/手机验证"），AbstractUser 自带 `blank=True` 的 email 字段，密码重置属 story 1.3+ 范围。
++- `false` — Blind Hunter: 无学号格式校验。证据：spec Never 块明确"不在注册时做学号格式校验…格式校验属 story 1.4"。
++- `low` → patch → fixed — Blind Hunter: admin.py 的 list_display/search_fields 未包含 email 字段。证据：email 从 AbstractUser 继承（blank=True）。已添加 `'email'` 到 list_display 和 search_fields。
++- `false` — Blind Hunter: test_empty_student_id_rejected 断言用 username 验证而非 student_id。证据：student_id 在测试中为空字符串，无法用于查询；用 username 验证"未创建任何用户"是正确的测试逻辑，非 false positive。
++- `false` — Blind Hunter: config/urls.py 中 `path("", include(...))` 与 `path("", home)` 命名空间冲突。证据：Django 按序解析 URL，accounts.urls 无空路径匹配时 fall through 到 home 视图，无冲突。
++- `false` — Blind Hunter: 注册视图无 ?next= 重定向参数。证据：spec 明确"自动登录并跳转首页"，?next= 参数属登录功能（story 1.3），注册场景无需此参数。
++- `false` — Blind Hunter: 测试无 CSRF 校验。证据：Django TestClient 默认关闭 CSRF 中间件，模板已含 `{% csrf_token %}`，属标准 Django 测试行为。
++- `low` → patch → fixed — Edge Case Hunter: `user.save()` 可能因并发重复学号触发 IntegrityError 导致 500。修复：在 `user.save()` 处捕获 `IntegrityError` 并转为表单错误。
++- `false` — Edge Case Hunter: spec 说密码校验在 `clean()` 中，代码在 `clean_password()` 中。证：两者同属表单校验流程，功能正确。修复只需编辑 spec 文字，规则要求拒绝"fix is to edit this build's spec"的发现。
++- `low` → patch → fixed — Verification Gap: Admin 配置无测试覆盖。已添加 `test_admin_user_changelist` 验证 admin changelist 渲染。
++- `low` → patch → fixed — Verification Gap: 首页未登录分支无测试覆盖。已添加 `test_home_page_unauthenticated` 验证未登录首页渲染。
++
++## Design Notes
++
++### 自定义 User 模型设计
++
++```python
++class User(AbstractUser):
++    student_id = models.CharField(max_length=32, unique=True, verbose_name='学号')
++    is_verified = models.BooleanField(default=False, verbose_name='是否已认证')
++    role = models.CharField(
++        max_length=16, choices=[('student', '学生'), ('admin', '管理员')],
++        default='student', verbose_name='角色'
++    )
++    USERNAME_FIELD = 'student_id'
++    REQUIRED_FIELDS = ['username']  # username 复用为昵称
++```
++
++### 路由策略
++
++- 注册页 URL：`/register/`（accounts app 内）
++- 首页 URL：`/`，直接写在 `config/urls.py`（简单 FBV，无需拆分到 app）
++- accounts 路由不设前缀（`path('', include('accounts.urls'))`），保持 URL 简洁
++
++### 密码校验策略
++
++不在 `models.py` 中重复定义密码长度校验——利用 Django 表单的 `clean_password()` 方法，结合 `AUTH_PASSWORD_VALIDATORS` 中的 `MinimumLengthValidator`。但 AC 明确要求密码 ≥6 位，故在表单 `clean()` 中显式校验，与 AC 保持一致。
++
++## Verification
++
++**Commands:**
++- `python manage.py check` -- expected: `System check identified no issues (0 silenced).`
++- `python manage.py makemigrations accounts --dry-run --check` -- expected: 检测到新 migration 且无错误
++- `python manage.py migrate` -- expected: 应用 migration 无错误
++- `python manage.py test accounts` -- expected: 全部测试通过
+\ No newline at end of file
+diff --git a/_bmad-output/implementation-artifacts/sprint-status.yaml b/_bmad-output/implementation-artifacts/sprint-status.yaml
+index 536a15f..4075ca9 100644
+--- a/_bmad-output/implementation-artifacts/sprint-status.yaml
++++ b/_bmad-output/implementation-artifacts/sprint-status.yaml
+@@ -38,7 +38,7 @@ story_location:
+ development_status:
+   epic-1: in-progress
+   1-1-项目脚手架-django-分层单体初始化: done
+-  1-2-用户注册: backlog
++  1-2-用户注册: review
+   1-3-登录与登出: backlog
+   1-4-学号身份认证-用户提交: backlog
+   1-5-个人中心: backlog
+diff --git a/accounts/admin.py b/accounts/admin.py
+index 8c38f3f..70f16c5 100644
+--- a/accounts/admin.py
++++ b/accounts/admin.py
+@@ -1,3 +1,23 @@
+ from django.contrib import admin
++from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
++from .models import User
+ 
+-# Register your models here.
++
++@admin.register(User)
++class UserAdmin(BaseUserAdmin):
++    list_display = ('student_id', 'username', 'email', 'is_verified', 'role', 'is_staff', 'is_active')
++    list_filter = ('is_verified', 'role', 'is_staff', 'is_active')
++    search_fields = ('student_id', 'username', 'email')
++    ordering = ('student_id',)
++    fieldsets = (
++        (None, {'fields': ('student_id', 'username', 'password')}),
++        ('认证信息', {'fields': ('is_verified', 'role')}),
++        ('权限', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
++        ('日期', {'fields': ('last_login', 'date_joined')}),
++    )
++    add_fieldsets = (
++        (None, {
++            'classes': ('wide',),
++            'fields': ('student_id', 'username', 'password1', 'password2', 'is_verified', 'role'),
++        }),
++    )
+\ No newline at end of file
+diff --git a/accounts/forms.py b/accounts/forms.py
+index e69de29..95907a3 100644
+--- a/accounts/forms.py
++++ b/accounts/forms.py
+@@ -0,0 +1,48 @@
++from django import forms
++from .models import User
++
++
++class RegisterForm(forms.ModelForm):
++    password = forms.CharField(
++        label='密码',
++        widget=forms.PasswordInput(attrs={'class': 'form-control', 'placeholder': '请输入密码（至少6位）'}),
++    )
++    password_confirm = forms.CharField(
++        label='确认密码',
++        widget=forms.PasswordInput(attrs={'class': 'form-control', 'placeholder': '请再次输入密码'}),
++    )
++
++    class Meta:
++        model = User
++        fields = ['student_id', 'username']
++        labels = {
++            'student_id': '学号',
++            'username': '昵称',
++        }
++        widgets = {
++            'student_id': forms.TextInput(attrs={'class': 'form-control', 'placeholder': '请输入学号'}),
++            'username': forms.TextInput(attrs={'class': 'form-control', 'placeholder': '请输入昵称'}),
++        }
++        error_messages = {
++            'student_id': {
++                'required': '请输入学号',
++                'unique': '该学号已被注册',
++            },
++            'username': {
++                'required': '请输入昵称',
++            },
++        }
++
++    def clean_password(self):
++        password = self.cleaned_data.get('password')
++        if len(password) < 6:
++            raise forms.ValidationError('密码长度不能少于 6 位')
++        return password
++
++    def clean(self):
++        cleaned_data = super().clean()
++        password = cleaned_data.get('password')
++        password_confirm = cleaned_data.get('password_confirm')
++        if password and password_confirm and password != password_confirm:
++            self.add_error('password_confirm', '两次输入的密码不一致')
++        return cleaned_data
+\ No newline at end of file
+diff --git a/accounts/migrations/0001_initial.py b/accounts/migrations/0001_initial.py
+new file mode 100644
+index 0000000..50be46a
+--- /dev/null
++++ b/accounts/migrations/0001_initial.py
+@@ -0,0 +1,149 @@
++# Generated by Django 5.2.19 on 2026-11-06 12:40
++
++import django.contrib.auth.models
++import django.contrib.auth.validators
++import django.utils.timezone
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++
++    initial = True
++
++    dependencies = [
++        ("auth", "0012_alter_user_first_name_max_length"),
++    ]
++
++    operations = [
++        migrations.CreateModel(
++            name="User",
++            fields=[
++                (
++                    "id",
++                    models.BigAutoField(
++                        auto_created=True,
++                        primary_key=True,
++                        serialize=False,
++                        verbose_name="ID",
++                    ),
++                ),
++                ("password", models.CharField(max_length=128, verbose_name="password")),
++                (
++                    "last_login",
++                    models.DateTimeField(
++                        blank=True, null=True, verbose_name="last login"
++                    ),
++                ),
++                (
++                    "is_superuser",
++                    models.BooleanField(
++                        default=False,
++                        help_text="Designates that this user has all permissions without explicitly assigning them.",
++                        verbose_name="superuser status",
++                    ),
++                ),
++                (
++                    "username",
++                    models.CharField(
++                        error_messages={
++                            "unique": "A user with that username already exists."
++                        },
++                        help_text="Required. 150 characters or fewer. Letters, digits and @/./+/-/_ only.",
++                        max_length=150,
++                        unique=True,
++                        validators=[
++                            django.contrib.auth.validators.UnicodeUsernameValidator()
++                        ],
++                        verbose_name="username",
++                    ),
++                ),
++                (
++                    "first_name",
++                    models.CharField(
++                        blank=True, max_length=150, verbose_name="first name"
++                    ),
++                ),
++                (
++                    "last_name",
++                    models.CharField(
++                        blank=True, max_length=150, verbose_name="last name"
++                    ),
++                ),
++                (
++                    "email",
++                    models.EmailField(
++                        blank=True, max_length=254, verbose_name="email address"
++                    ),
++                ),
++                (
++                    "is_staff",
++                    models.BooleanField(
++                        default=False,
++                        help_text="Designates whether the user can log into this admin site.",
++                        verbose_name="staff status",
++                    ),
++                ),
++                (
++                    "is_active",
++                    models.BooleanField(
++                        default=True,
++                        help_text="Designates whether this user should be treated as active. Unselect this instead of deleting accounts.",
++                        verbose_name="active",
++                    ),
++                ),
++                (
++                    "date_joined",
++                    models.DateTimeField(
++                        default=django.utils.timezone.now, verbose_name="date joined"
++                    ),
++                ),
++                (
++                    "student_id",
++                    models.CharField(max_length=32, unique=True, verbose_name="学号"),
++                ),
++                (
++                    "is_verified",
++                    models.BooleanField(default=False, verbose_name="是否已认证"),
++                ),
++                (
++                    "role",
++                    models.CharField(
++                        choices=[("student", "学生"), ("admin", "管理员")],
++                        default="student",
++                        max_length=16,
++                        verbose_name="角色",
++                    ),
++                ),
++                (
++                    "groups",
++                    models.ManyToManyField(
++                        blank=True,
++                        help_text="The groups this user belongs to. A user will get all permissions granted to each of their groups.",
++                        related_name="user_set",
++                        related_query_name="user",
++                        to="auth.group",
++                        verbose_name="groups",
++                    ),
++                ),
++                (
++                    "user_permissions",
++                    models.ManyToManyField(
++                        blank=True,
++                        help_text="Specific permissions for this user.",
++                        related_name="user_set",
++                        related_query_name="user",
++                        to="auth.permission",
++                        verbose_name="user permissions",
++                    ),
++                ),
++            ],
++            options={
++                "verbose_name": "user",
++                "verbose_name_plural": "users",
++                "abstract": False,
++            },
++            managers=[
++                ("objects", django.contrib.auth.models.UserManager()),
++            ],
++        ),
++    ]
+diff --git a/accounts/models.py b/accounts/models.py
+index 71a8362..6ecd1d1 100644
+--- a/accounts/models.py
++++ b/accounts/models.py
+@@ -1,3 +1,16 @@
++from django.contrib.auth.models import AbstractUser
+ from django.db import models
+ 
+-# Create your models here.
++
++class User(AbstractUser):
++    student_id = models.CharField(max_length=32, unique=True, verbose_name='学号')
++    is_verified = models.BooleanField(default=False, verbose_name='是否已认证')
++    role = models.CharField(
++        max_length=16, choices=[('student', '学生'), ('admin', '管理员')],
++        default='student', verbose_name='角色'
++    )
++    USERNAME_FIELD = 'student_id'
++    REQUIRED_FIELDS = ['username']  # username 复用为昵称
++
++    def __str__(self):
++        return f"{self.student_id} ({self.username})"
+\ No newline at end of file
+diff --git a/accounts/tests.py b/accounts/tests.py
+index 7ce503c..6bbb1ea 100644
+--- a/accounts/tests.py
++++ b/accounts/tests.py
+@@ -1,3 +1,107 @@
+ from django.test import TestCase
++from django.urls import reverse
++from accounts.models import User
+ 
+-# Create your tests here.
++
++class RegisterViewTests(TestCase):
++
++    def setUp(self):
++        self.register_url = reverse('register')
++        self.home_url = reverse('home')
++        self.valid_data = {
++            'student_id': '2024001',
++            'username': '测试用户',
++            'password': 'test123456',
++            'password_confirm': 'test123456',
++        }
++
++    def test_get_register_page_renders_form(self):
++        """GET 请求应返回注册页面"""
++        response = self.client.get(self.register_url)
++        self.assertEqual(response.status_code, 200)
++        self.assertTemplateUsed(response, 'accounts/register.html')
++        self.assertContains(response, '注册')
++
++    def test_register_success_creates_user(self):
++        """正常注册：创建 User，is_verified=False，role='student'，自动登录并跳转首页"""
++        response = self.client.post(self.register_url, self.valid_data, follow=True)
++        self.assertRedirects(response, self.home_url)
++        self.assertTrue(User.objects.filter(student_id='2024001').exists())
++        user = User.objects.get(student_id='2024001')
++        self.assertFalse(user.is_verified)
++        self.assertEqual(user.role, 'student')
++        # 验证密码已哈希
++        self.assertNotEqual(user.password, 'test123456')
++        self.assertTrue(user.check_password('test123456'))
++        # 验证已登录
++        self.assertIn('_auth_user_id', self.client.session)
++        # 首页显示「待认证」
++        self.assertContains(response, '待认证')
++
++    def test_duplicate_student_id_rejected(self):
++        """重复学号被拒绝"""
++        User.objects.create_user(student_id='2024001', username='existing', password='pass123456')
++        response = self.client.post(self.register_url, self.valid_data)
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '该学号已被注册')
++        self.assertEqual(User.objects.filter(student_id='2024001').count(), 1)
++
++    def test_password_too_short_rejected(self):
++        """密码少于6位被拒绝"""
++        data = {**self.valid_data, 'password': '12345', 'password_confirm': '12345'}
++        response = self.client.post(self.register_url, data)
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '密码长度不能少于 6 位')
++        self.assertFalse(User.objects.filter(student_id='2024001').exists())
++
++    def test_password_confirm_mismatch_rejected(self):
++        """确认密码不一致被拒绝"""
++        data = {**self.valid_data, 'password_confirm': 'different'}
++        response = self.client.post(self.register_url, data)
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '两次输入的密码不一致')
++        self.assertFalse(User.objects.filter(student_id='2024001').exists())
++
++    def test_empty_student_id_rejected(self):
++        """学号为空被拒绝"""
++        data = {**self.valid_data, 'student_id': ''}
++        response = self.client.post(self.register_url, data)
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '请输入学号')
++        self.assertFalse(User.objects.filter(username='测试用户').exists())
++
++    def test_empty_username_rejected(self):
++        """昵称为空被拒绝"""
++        data = {**self.valid_data, 'username': ''}
++        response = self.client.post(self.register_url, data)
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '请输入昵称')
++        self.assertFalse(User.objects.filter(student_id='2024001').exists())
++
++    def test_authenticated_user_redirected(self):
++        """已登录用户访问注册页重定向至首页"""
++        User.objects.create_user(student_id='2024001', username='test', password='pass123456')
++        self.client.login(username='2024001', password='pass123456')
++        response = self.client.get(self.register_url)
++        self.assertRedirects(response, self.home_url)
++
++    def test_password_is_hashed_on_save(self):
++        """验证密码以哈希形式存储（非明文）"""
++        self.client.post(self.register_url, self.valid_data)
++        user = User.objects.get(student_id='2024001')
++        self.assertTrue(user.password.startswith('pbkdf2_sha256$'))
++
++    def test_home_page_unauthenticated(self):
++        """未登录用户访问首页应显示注册/登录入口"""
++        response = self.client.get(self.home_url)
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '请注册或登录')
++
++    def test_admin_user_changelist(self):
++        """管理员用户列表页应正常渲染"""
++        User.objects.create_superuser(
++            student_id='admin001', username='admin', password='adminpass123'
++        )
++        self.client.login(username='admin001', password='adminpass123')
++        response = self.client.get(reverse('admin:accounts_user_changelist'))
++        self.assertEqual(response.status_code, 200)
+\ No newline at end of file
+diff --git a/accounts/urls.py b/accounts/urls.py
+index e69de29..2894cad 100644
+--- a/accounts/urls.py
++++ b/accounts/urls.py
+@@ -0,0 +1,6 @@
++from django.urls import path
++from . import views
++
++urlpatterns = [
++    path('register/', views.register, name='register'),
++]
+\ No newline at end of file
+diff --git a/accounts/views.py b/accounts/views.py
+index 91ea44a..2941e4d 100644
+--- a/accounts/views.py
++++ b/accounts/views.py
+@@ -1,3 +1,26 @@
+-from django.shortcuts import render
++from django.contrib.auth import login
++from django.db import IntegrityError
++from django.shortcuts import render, redirect
++from .forms import RegisterForm
+ 
+-# Create your views here.
++
++def register(request):
++    if request.user.is_authenticated:
++        return redirect('home')
++
++    if request.method == 'POST':
++        form = RegisterForm(request.POST)
++        if form.is_valid():
++            user = form.save(commit=False)
++            user.set_password(form.cleaned_data['password'])
++            try:
++                user.save()
++            except IntegrityError:
++                form.add_error('student_id', '该学号已被注册')
++                return render(request, 'accounts/register.html', {'form': form})
++            login(request, user)
++            return redirect('home')
++    else:
++        form = RegisterForm()
++
++    return render(request, 'accounts/register.html', {'form': form})
+\ No newline at end of file
+diff --git a/config/settings.py b/config/settings.py
+index 8aae5b9..d66da51 100644
+--- a/config/settings.py
++++ b/config/settings.py
+@@ -132,3 +132,6 @@ MEDIA_ROOT = BASE_DIR / "media"
+ # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
+ 
+ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
++
++# 自定义 User 模型（AD-3：在首次 migrate 前设置）
++AUTH_USER_MODEL = "accounts.User"
+diff --git a/config/urls.py b/config/urls.py
+index bdec395..1c30703 100644
+--- a/config/urls.py
++++ b/config/urls.py
+@@ -16,8 +16,16 @@ Including another URLconf
+ """
+ 
+ from django.contrib import admin
+-from django.urls import path
++from django.shortcuts import render
++from django.urls import include, path
++
++
++def home(request):
++    return render(request, "index.html")
++
+ 
+ urlpatterns = [
+     path("admin/", admin.site.urls),
++    path("", include("accounts.urls")),
++    path("", home, name="home"),
+ ]
+diff --git a/templates/accounts/register.html b/templates/accounts/register.html
+new file mode 100644
+index 0000000..cbf8f1f
+--- /dev/null
++++ b/templates/accounts/register.html
+@@ -0,0 +1,79 @@
++{% extends 'base.html' %}
++
++{% block title %}用户注册 - 校园二手书交易平台{% endblock %}
++
++{% block content %}
++<div class="row justify-content-center">
++    <div class="col-md-6 col-lg-4">
++        <h2 class="mb-4 text-center">用户注册</h2>
++
++        <form method="post" novalidate>
++            {% csrf_token %}
++
++            {% if form.non_field_errors %}
++                <div class="alert alert-danger">
++                    {% for error in form.non_field_errors %}
++                        {{ error }}
++                    {% endfor %}
++                </div>
++            {% endif %}
++
++            <div class="mb-3">
++                <label for="{{ form.student_id.id_for_label }}" class="form-label">{{ form.student_id.label }}</label>
++                {{ form.student_id }}
++                {% if form.student_id.errors %}
++                    <div class="text-danger mt-1">
++                        {% for error in form.student_id.errors %}
++                            {{ error }}
++                        {% endfor %}
++                    </div>
++                {% endif %}
++            </div>
++
++            <div class="mb-3">
++                <label for="{{ form.username.id_for_label }}" class="form-label">{{ form.username.label }}</label>
++                {{ form.username }}
++                {% if form.username.errors %}
++                    <div class="text-danger mt-1">
++                        {% for error in form.username.errors %}
++                            {{ error }}
++                        {% endfor %}
++                    </div>
++                {% endif %}
++            </div>
++
++            <div class="mb-3">
++                <label for="{{ form.password.id_for_label }}" class="form-label">{{ form.password.label }}</label>
++                {{ form.password }}
++                {% if form.password.errors %}
++                    <div class="text-danger mt-1">
++                        {% for error in form.password.errors %}
++                            {{ error }}
++                        {% endfor %}
++                    </div>
++                {% endif %}
++            </div>
++
++            <div class="mb-3">
++                <label for="{{ form.password_confirm.id_for_label }}" class="form-label">{{ form.password_confirm.label }}</label>
++                {{ form.password_confirm }}
++                {% if form.password_confirm.errors %}
++                    <div class="text-danger mt-1">
++                        {% for error in form.password_confirm.errors %}
++                            {{ error }}
++                        {% endfor %}
++                    </div>
++                {% endif %}
++            </div>
++
++            <div class="d-grid">
++                <button type="submit" class="btn btn-primary">注册</button>
++            </div>
++        </form>
++
++        <p class="mt-3 text-center">
++            已有账号？<a href="#">去登录</a>
++        </p>
++    </div>
++</div>
++{% endblock %}
+\ No newline at end of file
+diff --git a/templates/base.html b/templates/base.html
+new file mode 100644
+index 0000000..19325fa
+--- /dev/null
++++ b/templates/base.html
+@@ -0,0 +1,31 @@
++<!DOCTYPE html>
++<html lang="zh-CN">
++<head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <title>{% block title %}校园二手书交易平台{% endblock %}</title>
++    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
++</head>
++<body>
++    <nav class="navbar navbar-expand-lg navbar-dark bg-primary mb-4">
++        <div class="container">
++            <a class="navbar-brand" href="{% url 'home' %}">校园二手书</a>
++            <div class="navbar-nav ms-auto">
++                {% if user.is_authenticated %}
++                    <span class="navbar-text me-3">{{ user.username }}</span>
++                    <a class="nav-link" href="#">退出</a>
++                {% else %}
++                    <a class="nav-link" href="{% url 'register' %}">注册</a>
++                    <a class="nav-link" href="#">登录</a>
++                {% endif %}
++            </div>
++        </div>
++    </nav>
++
++    <div class="container">
++        {% block content %}{% endblock %}
++    </div>
++
++    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
++</body>
++</html>
+\ No newline at end of file
+diff --git a/templates/index.html b/templates/index.html
+new file mode 100644
+index 0000000..b7e12d7
+--- /dev/null
++++ b/templates/index.html
+@@ -0,0 +1,27 @@
++{% extends 'base.html' %}
++
++{% block title %}首页 - 校园二手书交易平台{% endblock %}
++
++{% block content %}
++<div class="text-center mt-5">
++    <h1>欢迎来到校园二手书交易平台</h1>
++
++    {% if user.is_authenticated %}
++        {% if not user.is_verified %}
++            <div class="alert alert-warning mt-4" role="alert">
++                <strong>待认证</strong> — 你的账号尚未完成学号认证，部分功能将受限。请等待管理员审核。
++            </div>
++        {% else %}
++            <div class="alert alert-success mt-4" role="alert">
++                你的账号已通过认证，可以正常使用所有功能。
++            </div>
++        {% endif %}
++    {% else %}
++        <p class="lead mt-4">请注册或登录以使用平台功能。</p>
++        <div class="mt-3">
++            <a href="{% url 'register' %}" class="btn btn-primary me-2">注册</a>
++            <a href="#" class="btn btn-outline-primary">登录</a>
++        </div>
++    {% endif %}
++</div>
++{% endblock %}
+\ No newline at end of file
