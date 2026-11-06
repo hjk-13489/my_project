@@ -1,0 +1,14 @@
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- 虚拟环境 ---
+.venv/
+
+# --- Django ---
+db.sqlite3
+*.sqlite3
+
+# 上传媒体（运行时内容，仅保留 .gitkeep 占位）
+media/*
+!media/.gitkeep

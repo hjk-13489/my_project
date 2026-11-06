@@ -1,0 +1,7 @@
+# Python 运行时依赖（pip install -r requirements.txt）
+# 版本锁定：以本文件为准（architecture.md「Stack」）
+Django==5.2.19
+Pillow==13.0.0
+
+# 前端资产版本声明（非 pip 依赖，经 static/ 引入的服务端渲染资源）
+# Bootstrap 5.3
