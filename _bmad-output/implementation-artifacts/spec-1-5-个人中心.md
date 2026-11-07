@@ -76,6 +76,31 @@ context:
 - Given 已登录用户，When 浏览任意页面，Then 导航栏「个人中心」链接指向 `/profile/`。
 - Given 1.1–1.4 的既有用例，When 运行完整测试套件，Then 47 个既有用例仍全部通过。
 
+### Review Findings
+
+> 2026-11-07 ad hoc code review（`/bmad-code-review`），范围 `0652f63..HEAD (2bc8c45)`，模式 `full`；生效审查层：Edge Case Hunter + Acceptance Auditor（团队精简配置 `_bmad/custom/bmad-code-review.toml` 禁用 Blind Hunter / Verification Gap）。7 条原始发现 → 1 decision-needed（已裁决转 patch）、1 patch、0 defer、6 rejected。
+
+**Decision Needed（已裁决）**
+
+- [x] [Review][Decision] 冻结区 I/O 矩阵「无认证申请」行要求无条件给出「去认证入口」，实现额外附加 `not is_verified` 条件并由测试锁定 — [templates/accounts/profile.html:49-54; accounts/tests.py:715-722] 冻结矩阵写「从未提交 → 尚未提交认证申请 + 去认证入口」；`profile.html` 在无申请分支内再嵌 `{% if not profile_user.is_verified %}` 才渲染按钮，`test_go_verify_button_hidden_verified_without_history` 显式断言「已认证且无申请」时隐藏。该状态可达（`accounts/admin.py:14/21` 允许管理员直接置 `is_verified=True` 而不产生申请记录，`test_verified_user_shows_verified_status` 亦构造此状态），因此用户会看到「✓ 已认证」+「尚未提交认证申请」却无去认证入口。但 `views.py:69-70` 对已认证用户访问 `/verify/` 直接 302 首页、`base.html:17-22` 也已对已认证用户隐藏去认证链接，去掉守卫反而制造死链。**人类裁决（2026-11-07，选项 2）：以冻结规格为准改代码**，转为下方 Patch；冻结区不修改。
+
+**Patch**
+
+- [x] [Review][Patch] 去掉 `profile.html:51/53` 的 `{% if not profile_user.is_verified %}` 守卫，使「无认证申请」分支无条件渲染「去认证」按钮；同步调整 `accounts/tests.py` 的 `test_go_verify_button_hidden_verified_without_history` → `test_go_verify_button_shown_verified_without_history`，断言已认证且无申请时按钮存在且全页 `去认证` 仅出现 1 次 [templates/accounts/profile.html:49-52; accounts/tests.py:715-727] — 同步更新 Implementation Notes 的「去认证入口」记述。**已应用（2026-11-07）**：`manage.py check` 无问题、`makemigrations --check --dry-run` → `No changes detected`、`manage.py test` → 62 tests OK（47 既有 + 15 `ProfileViewTests`）。
+
+**Defer**
+
+_无。_
+
+**Rejected**
+
+- `false` → rejected — EC-1「我的发布 `{% else %}` 分支空白」：`accounts/views.py:132` 的 `my_listings_empty` 是字面 `True`，全仓仅此一处赋值且无任何请求路径可置为 False（Grep 全库确认），`profile.html:65-67` 的 else 分支只含 Django 注释，在交付程序中不可达；人类决策 A 明确要求「壳 + 空状态」，补齐 else 需新增上下文契约、扩大公开表面，不构成当前缺陷。
+- `false` → rejected — EC-2「我的订单 `{% else %}` 分支空白」：同 EC-1，`views.py:133` 字面 `True`，`profile.html:78-80` 分支不可达。
+- `false` → rejected — EC-3「我的消息 `{% else %}` 分支空白」：同 EC-1，`views.py:134` 字面 `True`，`profile.html:91-93` 分支不可达。
+- `false` → rejected — EC-4「我的评价 `{% else %}` 分支空白」：同 EC-1，`views.py:135` 字面 `True`，`profile.html:104-106` 分支不可达。
+- `low` → rejected — 冻结区 I/O 矩阵写 `require_GET` 而实现用 `@require_safe`：代码本身正确（Django 5.2.19 的 `require_GET` 对 HEAD 返回 405，违反 Always #1「仅非 GET/HEAD → 405」；`tests.py:661/674/675` 已断言 `Allow: GET, HEAD` 与 HEAD 200），矩阵单元格属冻结区实现提示措辞，差异已由 Implementation Notes 记录。修复方式是编辑被审查的 spec 本身，按 triage 规则 reject。
+- `low` → rejected — spec frontmatter `status: done` 与 `sprint-status.yaml` 的 `1-5-个人中心: review` 状态不一致：两者由工作流不同阶段写入，代码审查收尾阶段会同步 sprint 状态；修复方式是编辑被审查的 spec / 跟踪工件，按 triage 规则 reject。
+
 ## Implementation Notes
 
 - 实现由无上下文子代理按本规格完成；改动共 7 个文件：`accounts/urls.py`、`accounts/views.py`、`accounts/tests.py`、`templates/accounts/profile.html`（新建）、`templates/base.html`、本规格、`sprint-status.yaml`。
@@ -84,7 +109,7 @@ context:
 - 审查补丁把 `@require_GET` 换为 `@require_safe`：Django 5.2.19 的 `require_GET` = `require_http_methods(['GET'])`，HEAD 返回 405 且 `Allow: GET`；`require_safe` 放行 GET/HEAD 并对 PUT/PATCH/DELETE/POST 返回 405 且 `Allow: GET, HEAD`，符合冻结区「仅非 GET/HEAD → 405」。冻结区 I/O 矩阵中的 `require_GET` 是实现提示措辞，按工作流不可修改，此处记录实际实现。
 - 验证（项目 `.venv` Python 3.13.1 / Django 5.2.19）：`manage.py check` 无问题；`makemigrations --check --dry-run` → `No changes detected`；`manage.py test` → 62 tests OK（47 既有 + 15 新增）；`accounts.tests.ProfileViewTests -v 2` → 15 个用例逐个 ok，矩阵 7 行均有覆盖且实际执行通过。
 - 环境注意：系统 PATH 上的 `python` 未安装 Django，须用 `.venv/Scripts/python.exe`。
-- 已知取舍：时间按 `TIME_ZONE='UTC'` 显示，未做本地化；「去认证」入口仅在无认证申请且未认证时出现（有 rejected 历史时只展示历史，不再显示入口）。四板块为空是人类决策 A 的预期结果，非遗漏。
+- 已知取舍：时间按 `TIME_ZONE='UTC'` 显示，未做本地化；「去认证」入口在**无认证申请**时出现（含有认证历史以外的全部情形；有认证历史时只展示历史，不再显示入口）。2026-11-07 代码审查人类裁决（选项 2）以冻结区矩阵为准，去掉了原先的 `not is_verified` 守卫：管理员在 `UserAdmin` 直接置 `is_verified=True` 且无申请记录的用户也会看到该按钮；已知代价是 `verify_view` 会把已认证用户 302 回首页，按钮此时不产生提交行为。四板块为空是人类决策 A 的预期结果，非遗漏。
 
 ## Spec Change Log
 

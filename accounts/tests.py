@@ -712,14 +712,18 @@ class ProfileViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, 'btn btn-outline-primary btn-sm')
 
-    def test_go_verify_button_hidden_verified_without_history(self):
-        """已认证且无申请：去认证按钮隐藏"""
+    def test_go_verify_button_shown_verified_without_history(self):
+        """已认证且无申请：按冻结规格矩阵仍显示去认证入口"""
         self.user.is_verified = True
         self.user.save(update_fields=['is_verified'])
         self._login()
         response = self.client.get(self.profile_url)
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'btn btn-outline-primary btn-sm')
+        self.assertContains(response, '✓ 已认证', count=2)
+        self.assertContains(response, '尚未提交认证申请')
+        # 卡片内按钮为独有标记；导航栏对已认证用户不渲染去认证链接
+        self.assertContains(response, 'btn btn-outline-primary btn-sm')
+        self.assertContains(response, '去认证', count=1)
 
     def test_mixed_history_isolates_other_user_data(self):
         """AD-4 混合场景：本人与他人都有申请时仅返回本人数据"""

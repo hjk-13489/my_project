@@ -48,9 +48,7 @@
             </ul>
         {% else %}
             <p class="text-muted mb-2">尚未提交认证申请</p>
-            {% if not profile_user.is_verified %}
-                <a href="{% url 'verify' %}" class="btn btn-outline-primary btn-sm">去认证</a>
-            {% endif %}
+            <a href="{% url 'verify' %}" class="btn btn-outline-primary btn-sm">去认证</a>
         {% endif %}
     </div>
 </div>
