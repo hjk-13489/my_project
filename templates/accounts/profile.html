@@ -1,0 +1,111 @@
+{% extends 'base.html' %}
+
+{% block title %}个人中心 - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2 class="mb-4">个人中心</h2>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header">账号信息</div>
+    <div class="card-body">
+        <dl class="row mb-0">
+            <dt class="col-sm-3">昵称</dt>
+            <dd class="col-sm-9">{{ profile_user.username }}</dd>
+
+            <dt class="col-sm-3">学号</dt>
+            <dd class="col-sm-9">{{ profile_user.student_id }}</dd>
+
+            <dt class="col-sm-3">认证状态</dt>
+            <dd class="col-sm-9">
+                {% if profile_user.is_verified %}
+                    <span class="badge bg-success">✓ 已认证</span>
+                {% else %}
+                    <span class="badge bg-warning text-dark">待认证</span>
+                {% endif %}
+            </dd>
+
+            <dt class="col-sm-3">注册时间</dt>
+            <dd class="col-sm-9">{{ profile_user.date_joined|date:'Y-m-d H:i' }}</dd>
+        </dl>
+    </div>
+</div>
+
+<div class="card mb-4">
+    <div class="card-header">认证申请历史</div>
+    <div class="card-body">
+        {% if verification_requests %}
+            <ul class="list-group list-group-flush">
+                {% for req in verification_requests %}
+                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                        <span>{{ req.get_status_display }}</span>
+                        <span class="text-muted">{{ req.created_at|date:'Y-m-d H:i' }}</span>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p class="text-muted mb-2">尚未提交认证申请</p>
+            {% if not profile_user.is_verified %}
+                <a href="{% url 'verify' %}" class="btn btn-outline-primary btn-sm">去认证</a>
+            {% endif %}
+        {% endif %}
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header">我的发布</div>
+            <div class="card-body">
+                {% if my_listings_empty %}
+                    <p class="text-muted mb-0">暂无发布记录，你还没有发布任何商品</p>
+                {% else %}
+                    {# 后续 Epic 2 以 filter(owner=profile_user) 替换空状态 #}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header">我的订单</div>
+            <div class="card-body">
+                {% if my_orders_empty %}
+                    <p class="text-muted mb-0">暂无订单记录，你还没有任何订单</p>
+                {% else %}
+                    {# 后续 Epic 3 以 filter(buyer=profile_user) 替换空状态 #}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header">我的消息</div>
+            <div class="card-body">
+                {% if my_messages_empty %}
+                    <p class="text-muted mb-0">暂无消息记录，你还没有任何消息</p>
+                {% else %}
+                    {# 后续 Epic 3 以 filter(owner=profile_user) 替换空状态 #}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6 mb-4">
+        <div class="card h-100">
+            <div class="card-header">我的评价</div>
+            <div class="card-body">
+                {% if my_reviews_empty %}
+                    <p class="text-muted mb-0">暂无评价记录，你还没有任何评价</p>
+                {% else %}
+                    {# 后续 Epic 4 以 filter(owner=profile_user) 替换空状态 #}
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

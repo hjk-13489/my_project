@@ -12,6 +12,7 @@
             <a class="navbar-brand" href="{% url 'home' %}">校园二手书</a>
             <div class="navbar-nav ms-auto">
                 {% if user.is_authenticated %}
+                    <a class="nav-link" href="{% url 'profile' %}">个人中心</a>
                     <span class="navbar-text me-2">{{ user.username }}</span>
                     {% if user.is_verified %}
                         <span class="navbar-text me-3"><span class="badge bg-success">✓ 已认证</span></span>

@@ -513,3 +513,231 @@ class VerificationViewTests(TestCase):
         self.user.refresh_from_db()
         self.assertEqual(verification.status, 'rejected')
         self.assertFalse(self.user.is_verified)
+
+
+class ProfileViewTests(TestCase):
+
+    def setUp(self):
+        self.profile_url = reverse('profile')
+        self.home_url = reverse('home')
+        self.verify_url = reverse('verify')
+        self.student_id = '2024005'
+        self.username = '个人中心测试用户'
+        self.password = 'profilepass123'
+        self.user = User.objects.create_user(
+            student_id=self.student_id,
+            username=self.username,
+            password=self.password,
+        )
+
+    def _login(self, student_id=None, password=None):
+        self.client.login(
+            username=student_id or self.student_id,
+            password=password or self.password,
+        )
+
+    def _make_user(self, student_id, username='其他用户', password='otherpass123'):
+        return User.objects.create_user(
+            student_id=student_id, username=username, password=password
+        )
+
+    def test_unauthenticated_get_redirects_to_login_with_next(self):
+        """未登录 GET /profile/：302 跳转登录页并携带 next=/profile/"""
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/login/?next=/profile/')
+
+    def test_unauthenticated_post_redirects_to_login(self):
+        """未登录 POST /profile/：@login_required 在外层，仍先 302 跳转登录页"""
+        response = self.client.post(self.profile_url, {'foo': 'bar'})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, '/login/?next=/profile/')
+
+    def test_authenticated_get_returns_200_with_template(self):
+        """已登录 GET /profile/：200 且渲染个人中心模板"""
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'accounts/profile.html')
+        self.assertContains(response, '个人中心')
+
+    def test_page_shows_only_own_nickname_and_student_id(self):
+        """账号信息卡展示本人昵称、学号、认证状态徽标与注册时间"""
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertContains(response, '账号信息')
+        self.assertContains(response, self.username)
+        self.assertContains(response, self.student_id)
+        self.assertContains(response, '认证状态')
+        self.assertContains(response, '注册时间')
+        # 徽标同时出现在导航栏与卡片，count=2 锁定卡片自身徽标
+        self.assertContains(response, '待认证', count=2)
+        self.assertContains(
+            response, self.user.date_joined.strftime('%Y-%m-%d %H:%M')
+        )
+
+    def test_other_user_data_not_shown(self):
+        """库中存在他人账号与认证申请时，页面不出现其昵称、学号、状态"""
+        other = self._make_user('9998887', username='他人专属昵称ABC')
+        VerificationRequest.objects.create(
+            user=other, student_id='9998887', name='他人姓名', status='rejected'
+        )
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertNotContains(response, '他人专属昵称ABC')
+        self.assertNotContains(response, '9998887')
+        self.assertNotContains(response, '他人姓名')
+        self.assertNotContains(response, '已驳回')
+        # 服务端 queryset 仅含本人数据（本人无申请）
+        self.assertEqual(list(response.context['verification_requests']), [])
+        self.assertContains(response, '尚未提交认证申请')
+
+    def test_no_verification_request_shows_empty_state(self):
+        """从未提交认证申请：显示中文空状态与去认证入口（按钮独有标记）"""
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertContains(response, '尚未提交认证申请')
+        self.assertContains(response, '去认证')
+        self.assertContains(response, f'href="{self.verify_url}"')
+        # 导航栏同名链接不含此 class，此断言锁定卡片内按钮
+        self.assertContains(response, 'btn btn-outline-primary btn-sm')
+
+    def test_verification_history_shows_status_and_ordered(self):
+        """有申请：显示 get_status_display() 与提交时间，按 -created_at 排序"""
+        r1 = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='pending'
+        )
+        r2 = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='rejected'
+        )
+        r3 = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='approved'
+        )
+        from datetime import timedelta
+        from django.utils import timezone
+        now = timezone.now()
+        times = [
+            now - timedelta(days=3),
+            now - timedelta(days=2),
+            now - timedelta(days=1),
+        ]
+        for req, created_at in zip((r1, r2, r3), times):
+            VerificationRequest.objects.filter(pk=req.pk).update(created_at=created_at)
+
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '待审核')
+        self.assertContains(response, '已驳回')
+        self.assertContains(response, '已通过')
+        for created_at in times:
+            self.assertContains(response, created_at.strftime('%Y-%m-%d %H:%M'))
+        self.assertNotContains(response, '尚未提交认证申请')
+        # 有认证历史时去认证按钮隐藏
+        self.assertNotContains(response, 'btn btn-outline-primary btn-sm')
+        self.assertEqual(
+            [req.pk for req in response.context['verification_requests']],
+            [r3.pk, r2.pk, r1.pk],
+        )
+
+    def test_four_sections_show_chinese_empty_state(self):
+        """四个板块均呈现中文空状态提示"""
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertContains(response, '我的发布')
+        self.assertContains(response, '我的订单')
+        self.assertContains(response, '我的消息')
+        self.assertContains(response, '我的评价')
+        self.assertContains(response, '暂无发布记录')
+        self.assertContains(response, '暂无订单记录')
+        self.assertContains(response, '暂无消息记录')
+        self.assertContains(response, '暂无评价记录')
+
+    def test_authenticated_post_returns_405_without_writes(self):
+        """已登录 POST /profile/：405，不写入任何数据"""
+        self._login()
+        response = self.client.post(self.profile_url, {'student_id': 'hacked'})
+        self.assertEqual(response.status_code, 405)
+        self.assertEqual(response['Allow'], 'GET, HEAD')
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.student_id, self.student_id)
+        self.assertEqual(
+            VerificationRequest.objects.filter(user=self.user).count(), 0
+        )
+
+    def test_http_method_restrictions(self):
+        """已登录：PUT/PATCH/DELETE 405 且 Allow: GET, HEAD，HEAD 200"""
+        self._login()
+        for method in (self.client.put, self.client.patch, self.client.delete):
+            response = method(self.profile_url)
+            self.assertEqual(response.status_code, 405)
+            self.assertEqual(response['Allow'], 'GET, HEAD')
+        self.assertEqual(self.client.head(self.profile_url).status_code, 200)
+
+    def test_navbar_profile_link_only_for_authenticated(self):
+        """个人中心入口仅登录可见，且在渲染 base.html 的各页面均指向 /profile/"""
+        anonymous = self.client.get(self.home_url)
+        self.assertNotContains(anonymous, f'href="{self.profile_url}"')
+
+        self._login()
+        # 避开会 302 的注册/登录页，覆盖渲染 base.html 的页面
+        for url in (self.home_url, self.verify_url, self.profile_url):
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200, msg=url)
+            self.assertContains(response, f'href="{self.profile_url}"', msg_prefix=url)
+            self.assertContains(response, '个人中心', msg_prefix=url)
+
+    def test_verified_user_shows_verified_status(self):
+        """已认证用户个人中心显示卡片自身的已认证徽标与注册信息"""
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 200)
+        # 徽标同时出现在导航栏与卡片，count=2 锁定卡片自身徽标
+        self.assertContains(response, '✓ 已认证', count=2)
+        self.assertContains(response, '认证状态')
+        self.assertContains(response, '注册时间')
+        self.assertContains(
+            response, self.user.date_joined.strftime('%Y-%m-%d %H:%M')
+        )
+
+    def test_go_verify_button_hidden_unverified_with_history(self):
+        """未认证但已有申请：去认证按钮隐藏"""
+        VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='pending'
+        )
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'btn btn-outline-primary btn-sm')
+
+    def test_go_verify_button_hidden_verified_without_history(self):
+        """已认证且无申请：去认证按钮隐藏"""
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'btn btn-outline-primary btn-sm')
+
+    def test_mixed_history_isolates_other_user_data(self):
+        """AD-4 混合场景：本人与他人都有申请时仅返回本人数据"""
+        other = self._make_user('9998886', username='他人混合昵称XYZ')
+        VerificationRequest.objects.create(
+            user=other, student_id='9998886', name='他人混合姓名', status='rejected'
+        )
+        own = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='本人姓名', status='pending'
+        )
+        self._login()
+        response = self.client.get(self.profile_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [req.pk for req in response.context['verification_requests']],
+            [own.pk],
+        )
+        self.assertNotContains(response, '他人混合昵称XYZ')
+        self.assertNotContains(response, '9998886')
+        self.assertNotContains(response, '他人混合姓名')
+        self.assertNotContains(response, '已驳回')

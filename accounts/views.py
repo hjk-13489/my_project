@@ -3,7 +3,7 @@ from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError
 from django.shortcuts import render, redirect
 from django.utils.http import url_has_allowed_host_and_scheme
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_safe
 from .forms import LoginForm, RegisterForm, VerificationForm
 from .models import VerificationRequest
 
@@ -115,4 +115,22 @@ def verify_view(request):
     return render(request, 'accounts/verify.html', {
         'form': form,
         'pending_request': pending_request,
+    })
+
+
+# require_safe 放行 GET/HEAD：规格要求仅非 GET/HEAD 才 405，故不用仅放行 GET 的 require_GET。
+@login_required
+@require_safe
+def profile_view(request):
+    """个人中心：只读展示本人账号信息、认证申请历史，四个业务板块以中文空状态占位。"""
+    profile_user = request.user
+    return render(request, 'accounts/profile.html', {
+        'profile_user': profile_user,
+        'verification_requests': profile_user.verification_requests.all(),
+        # 方案 A「壳 + 空状态」：四板块暂无业务数据，统一空状态；Epic 2/3/4
+        # 接入真实数据时，以 filter(owner=profile_user) / filter(buyer=profile_user) 替换。
+        'my_listings_empty': True,
+        'my_orders_empty': True,
+        'my_messages_empty': True,
+        'my_reviews_empty': True,
     })
