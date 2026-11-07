@@ -128,3 +128,22 @@ Django 默认 `LOGIN_URL = '/accounts/login/'`，但本项目的登录 URL 为 `
 **Commands:**
 - `python manage.py check` — expected: `System check identified no issues (0 silenced).`
 - `python manage.py test accounts` — expected: 全部测试通过（含新增的登录/登出测试）
+
+### Review Findings
+
+- [x] [Review][Patch] 缺失尾部换行符 — `accounts/urls.py`、`accounts/views.py`、`templates/accounts/login.html` 三个文件缺少 EOF 换行符，违反 POSIX 约定 [accounts/views.py:61]
+- [x] [Review][Patch] `?next=` 空值无回归测试 — 代码通过 `request.GET.get('next') or 'home'` 正确处理了空字符串，但无对应测试用例覆盖此边界条件 [accounts/tests.py:256]
+- [x] [Review][Patch] `LoginForm.student_id` 缺少 `max_length` — 纯 `Form` 的 `CharField` 无默认上限，恶意超长 POST 体可通过表单验证浪费服务器资源 [accounts/forms.py:6]
+
+**Rejected:**
+- `false` — diff 内嵌旧版本代码：`story-1-3-review.diff` 中的旧代码是 spec 的 Review Triage Log 历史记录，非应用代码缺陷
+- `false` — Session fixation 缺少测试：Django `login()` 的 session key 轮换是框架级保证，非本 story 代码行为
+- `false` — 未显式设置 `SESSION_COOKIE_HTTPONLY`：Django 5.2 默认即为 `True`，不会遇到该缺陷
+- `false` — 登出按钮用 `<form><button>` 伪装链接：`@require_POST` 防 CSRF 强制登出是安全加固的合理代价
+- `false` — `'home'` 在 3 处硬编码：无用户影响，引入 `LOGIN_REDIRECT_URL` 设置增加不必要的间接层
+- `false` — `login_view` 非 GET/POST 方法返回 200：浏览器不会对登录表单发送 PUT/DELETE/PATCH 等方法
+- `false` — AC-4 缺端到端重定向测试：本 story 无 `@login_required` 保护视图，Django 框架保证重定向行为
+- `false` — 登出 POST form 与 spec「链接」措辞不符：有意的安全加固，spec 文档滞后于实现
+- `low` → rejected — 测试数量（spec 写 24 实际 25）：修复目标为 spec 本身
+- `low` → rejected — Design Notes 对 `redirect()` 安全性描述不准确：修复目标为 spec 本身
+- `low` → rejected — Implementation Notes 测试数量未更新：修复目标为 spec 本身

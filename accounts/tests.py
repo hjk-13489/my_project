@@ -181,6 +181,14 @@ class LoginViewTests(TestCase):
         )
         self.assertRedirects(response, self.home_url)
 
+    def test_login_empty_next_redirects_home(self):
+        """空 ?next= 参数应回退跳转首页"""
+        response = self.client.post(
+            self.login_url + '?next=',
+            {'student_id': self.student_id, 'password': self.password},
+        )
+        self.assertRedirects(response, self.home_url)
+
     def test_wrong_password_rejected(self):
         """错误密码：留在登录页并显示错误"""
         response = self.client.post(self.login_url, {

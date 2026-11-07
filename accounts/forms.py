@@ -5,6 +5,7 @@ from .models import User
 class LoginForm(forms.Form):
     student_id = forms.CharField(
         label='学号',
+        max_length=50,
         widget=forms.TextInput(attrs={'class': 'form-control', 'placeholder': '请输入学号'}),
         error_messages={'required': '请输入学号'},
     )
