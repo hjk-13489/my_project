@@ -135,3 +135,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # 自定义 User 模型（AD-3：在首次 migrate 前设置）
 AUTH_USER_MODEL = "accounts.User"
+
+# 登录 URL（login_required 装饰器跳转目标）
+LOGIN_URL = '/login/'

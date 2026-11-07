@@ -133,3 +133,127 @@ class RegisterViewTests(TestCase):
         response = self.client.get(self.home_url)
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '你的账号已通过认证')
+
+
+class LoginViewTests(TestCase):
+
+    def setUp(self):
+        self.login_url = reverse('login')
+        self.home_url = reverse('home')
+        self.student_id = '2024002'
+        self.password = 'testpass123'
+        self.user = User.objects.create_user(
+            student_id=self.student_id,
+            username='登录测试用户',
+            password=self.password,
+        )
+
+    def test_get_login_page_renders_form(self):
+        """GET 请求应返回登录页面"""
+        response = self.client.get(self.login_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'accounts/login.html')
+        self.assertContains(response, '登录')
+
+    def test_login_success_redirects_home(self):
+        """正常登录：建立 Session 并 302 跳转首页"""
+        response = self.client.post(self.login_url, {
+            'student_id': self.student_id,
+            'password': self.password,
+        })
+        self.assertRedirects(response, self.home_url)
+        self.assertIn('_auth_user_id', self.client.session)
+
+    def test_login_success_with_next_parameter(self):
+        """登录成功且带 ?next= 参数时跳转至指定页面"""
+        response = self.client.post(
+            self.login_url + '?next=/register/',
+            {'student_id': self.student_id, 'password': self.password},
+        )
+        self.assertRedirects(response, '/register/', fetch_redirect_response=False)
+
+    def test_login_external_next_redirects_home(self):
+        """外部 ?next=http://evil.com 应忽略并跳转首页"""
+        response = self.client.post(
+            self.login_url + '?next=http://evil.com',
+            {'student_id': self.student_id, 'password': self.password},
+            follow=True,
+        )
+        self.assertRedirects(response, self.home_url)
+
+    def test_wrong_password_rejected(self):
+        """错误密码：留在登录页并显示错误"""
+        response = self.client.post(self.login_url, {
+            'student_id': self.student_id,
+            'password': 'wrongpassword',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '学号或密码错误')
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_nonexistent_student_id_rejected(self):
+        """不存在的学号：留在登录页并显示错误（不区分学号不存在还是密码错误）"""
+        response = self.client.post(self.login_url, {
+            'student_id': '9999999',
+            'password': self.password,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '学号或密码错误')
+
+    def test_empty_student_id_rejected(self):
+        """学号为空被拒绝"""
+        response = self.client.post(self.login_url, {
+            'student_id': '',
+            'password': self.password,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '请输入学号')
+
+    def test_empty_password_rejected(self):
+        """密码为空被拒绝"""
+        response = self.client.post(self.login_url, {
+            'student_id': self.student_id,
+            'password': '',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '请输入密码')
+
+    def test_authenticated_user_redirected_from_login(self):
+        """已登录用户访问登录页重定向至首页"""
+        self.client.login(username=self.student_id, password=self.password)
+        response = self.client.get(self.login_url)
+        self.assertRedirects(response, self.home_url)
+
+
+class LogoutViewTests(TestCase):
+
+    def setUp(self):
+        self.login_url = reverse('login')
+        self.logout_url = reverse('logout')
+        self.home_url = reverse('home')
+        self.student_id = '2024003'
+        self.password = 'logoutpass123'
+        self.user = User.objects.create_user(
+            student_id=self.student_id,
+            username='登出测试用户',
+            password=self.password,
+        )
+
+    def test_logout_clears_session_and_redirects_login(self):
+        """登出：清除 Session 并 302 跳转 /login/"""
+        self.client.login(username=self.student_id, password=self.password)
+        self.assertIn('_auth_user_id', self.client.session)
+        response = self.client.post(self.logout_url)
+        self.assertRedirects(response, self.login_url)
+        self.assertNotIn('_auth_user_id', self.client.session)
+
+    def test_get_logout_returns_405(self):
+        """GET /logout/ 应返回 405 Method Not Allowed"""
+        self.client.login(username=self.student_id, password=self.password)
+        response = self.client.get(self.logout_url)
+        self.assertEqual(response.status_code, 405)
+
+    def test_login_url_setting_configured_correctly(self):
+        """配置验证：LOGIN_URL 设置正确"""
+        from django.conf import settings
+        self.assertEqual(settings.LOGIN_URL, '/login/')

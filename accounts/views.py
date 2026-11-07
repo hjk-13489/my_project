@@ -1,7 +1,9 @@
-from django.contrib.auth import login
+from django.contrib.auth import authenticate, login, logout
 from django.db import IntegrityError
 from django.shortcuts import render, redirect
-from .forms import RegisterForm
+from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_POST
+from .forms import LoginForm, RegisterForm
 
 
 def register(request):
@@ -27,3 +29,33 @@ def register(request):
         form = RegisterForm()
 
     return render(request, 'accounts/register.html', {'form': form})
+
+
+def login_view(request):
+    if request.user.is_authenticated:
+        return redirect('home')
+
+    if request.method == 'POST':
+        form = LoginForm(request.POST)
+        if form.is_valid():
+            student_id = form.cleaned_data['student_id']
+            password = form.cleaned_data['password']
+            user = authenticate(request, username=student_id, password=password)
+            if user is not None:
+                login(request, user)
+                next_url = request.GET.get('next') or 'home'
+                if not url_has_allowed_host_and_scheme(next_url, allowed_hosts=None):
+                    next_url = 'home'
+                return redirect(next_url)
+            else:
+                form.add_error(None, '学号或密码错误')
+    else:
+        form = LoginForm()
+
+    return render(request, 'accounts/login.html', {'form': form})
+
+
+@require_POST
+def logout_view(request):
+    logout(request)
+    return redirect('login')

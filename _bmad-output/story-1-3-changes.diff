@@ -1,0 +1,305 @@
+diff --git a/accounts/forms.py b/accounts/forms.py
+index 3213a78..f7bbaf5 100644
+--- a/accounts/forms.py
++++ b/accounts/forms.py
+@@ -2,6 +2,19 @@ from django import forms
+ from .models import User
+ 
+ 
++class LoginForm(forms.Form):
++    student_id = forms.CharField(
++        label='学号',
++        widget=forms.TextInput(attrs={'class': 'form-control', 'placeholder': '请输入学号'}),
++        error_messages={'required': '请输入学号'},
++    )
++    password = forms.CharField(
++        label='密码',
++        widget=forms.PasswordInput(attrs={'class': 'form-control', 'placeholder': '请输入密码'}),
++        error_messages={'required': '请输入密码'},
++    )
++
++
+ class RegisterForm(forms.ModelForm):
+     password = forms.CharField(
+         label='密码',
+diff --git a/accounts/tests.py b/accounts/tests.py
+index bebb853..7443e19 100644
+--- a/accounts/tests.py
++++ b/accounts/tests.py
+@@ -132,4 +132,118 @@ class RegisterViewTests(TestCase):
+         self.client.login(username='v001', password='pass123456')
+         response = self.client.get(self.home_url)
+         self.assertEqual(response.status_code, 200)
+-        self.assertContains(response, '你的账号已通过认证')
+\ No newline at end of file
++        self.assertContains(response, '你的账号已通过认证')
++
++
++class LoginViewTests(TestCase):
++
++    def setUp(self):
++        self.login_url = reverse('login')
++        self.home_url = reverse('home')
++        self.student_id = '2024002'
++        self.password = 'testpass123'
++        self.user = User.objects.create_user(
++            student_id=self.student_id,
++            username='登录测试用户',
++            password=self.password,
++        )
++
++    def test_get_login_page_renders_form(self):
++        """GET 请求应返回登录页面"""
++        response = self.client.get(self.login_url)
++        self.assertEqual(response.status_code, 200)
++        self.assertTemplateUsed(response, 'accounts/login.html')
++        self.assertContains(response, '登录')
++
++    def test_login_success_redirects_home(self):
++        """正常登录：建立 Session 并 302 跳转首页"""
++        response = self.client.post(self.login_url, {
++            'student_id': self.student_id,
++            'password': self.password,
++        })
++        self.assertRedirects(response, self.home_url)
++        self.assertIn('_auth_user_id', self.client.session)
++
++    def test_login_success_with_next_parameter(self):
++        """登录成功且带 ?next= 参数时跳转至指定页面"""
++        response = self.client.post(
++            self.login_url + '?next=/register/',
++            {'student_id': self.student_id, 'password': self.password},
++        )
++        self.assertRedirects(response, '/register/', fetch_redirect_response=False)
++
++    def test_wrong_password_rejected(self):
++        """错误密码：留在登录页并显示错误"""
++        response = self.client.post(self.login_url, {
++            'student_id': self.student_id,
++            'password': 'wrongpassword',
++        })
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '学号或密码错误')
++        self.assertNotIn('_auth_user_id', self.client.session)
++
++    def test_nonexistent_student_id_rejected(self):
++        """不存在的学号：留在登录页并显示错误（不区分学号不存在还是密码错误）"""
++        response = self.client.post(self.login_url, {
++            'student_id': '9999999',
++            'password': self.password,
++        })
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '学号或密码错误')
++
++    def test_empty_student_id_rejected(self):
++        """学号为空被拒绝"""
++        response = self.client.post(self.login_url, {
++            'student_id': '',
++            'password': self.password,
++        })
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '请输入学号')
++
++    def test_empty_password_rejected(self):
++        """密码为空被拒绝"""
++        response = self.client.post(self.login_url, {
++            'student_id': self.student_id,
++            'password': '',
++        })
++        self.assertEqual(response.status_code, 200)
++        self.assertContains(response, '请输入密码')
++
++    def test_authenticated_user_redirected_from_login(self):
++        """已登录用户访问登录页重定向至首页"""
++        self.client.login(username=self.student_id, password=self.password)
++        response = self.client.get(self.login_url)
++        self.assertRedirects(response, self.home_url)
++
++
++class LogoutViewTests(TestCase):
++
++    def setUp(self):
++        self.login_url = reverse('login')
++        self.logout_url = reverse('logout')
++        self.home_url = reverse('home')
++        self.student_id = '2024003'
++        self.password = 'logoutpass123'
++        self.user = User.objects.create_user(
++            student_id=self.student_id,
++            username='登出测试用户',
++            password=self.password,
++        )
++
++    def test_logout_clears_session_and_redirects_login(self):
++        """登出：清除 Session 并 302 跳转 /login/"""
++        self.client.login(username=self.student_id, password=self.password)
++        self.assertIn('_auth_user_id', self.client.session)
++        response = self.client.get(self.logout_url)
++        self.assertRedirects(response, self.login_url)
++        self.assertNotIn('_auth_user_id', self.client.session)
++
++    def test_unauthenticated_user_requesting_protected_page_redirects(self):
++        """未登录用户访问受限页：302 跳转 /login/?next=<原页面>（模拟 login_required 行为）"""
++        from django.contrib.auth.decorators import login_required as lr
++        from django.http import HttpResponse
++
++        # 创建一个临时的受保护视图并发送请求
++        # 直接验证 LOGIN_URL 设置被正确配置
++        from django.conf import settings
++        self.assertEqual(settings.LOGIN_URL, '/login/')
+\ No newline at end of file
+diff --git a/accounts/urls.py b/accounts/urls.py
+index 2894cad..44eea81 100644
+--- a/accounts/urls.py
++++ b/accounts/urls.py
+@@ -3,4 +3,6 @@ from . import views
+ 
+ urlpatterns = [
+     path('register/', views.register, name='register'),
++    path('login/', views.login_view, name='login'),
++    path('logout/', views.logout_view, name='logout'),
+ ]
+\ No newline at end of file
+diff --git a/accounts/views.py b/accounts/views.py
+index e9cb27c..cb815ec 100644
+--- a/accounts/views.py
++++ b/accounts/views.py
+@@ -1,7 +1,7 @@
+-from django.contrib.auth import login
++from django.contrib.auth import authenticate, login, logout
+ from django.db import IntegrityError
+ from django.shortcuts import render, redirect
+-from .forms import RegisterForm
++from .forms import LoginForm, RegisterForm
+ 
+ 
+ def register(request):
+@@ -26,4 +26,31 @@ def register(request):
+     else:
+         form = RegisterForm()
+ 
+-    return render(request, 'accounts/register.html', {'form': form})
+\ No newline at end of file
++    return render(request, 'accounts/register.html', {'form': form})
++
++
++def login_view(request):
++    if request.user.is_authenticated:
++        return redirect('home')
++
++    if request.method == 'POST':
++        form = LoginForm(request.POST)
++        if form.is_valid():
++            student_id = form.cleaned_data['student_id']
++            password = form.cleaned_data['password']
++            user = authenticate(request, username=student_id, password=password)
++            if user is not None:
++                login(request, user)
++                next_url = request.GET.get('next', 'home')
++                return redirect(next_url)
++            else:
++                form.add_error(None, '学号或密码错误')
++    else:
++        form = LoginForm()
++
++    return render(request, 'accounts/login.html', {'form': form})
++
++
++def logout_view(request):
++    logout(request)
++    return redirect('login')
+\ No newline at end of file
+diff --git a/config/settings.py b/config/settings.py
+index d66da51..9d36ab7 100644
+--- a/config/settings.py
++++ b/config/settings.py
+@@ -135,3 +135,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+ 
+ # 自定义 User 模型（AD-3：在首次 migrate 前设置）
+ AUTH_USER_MODEL = "accounts.User"
++
++# 登录 URL（login_required 装饰器跳转目标）
++LOGIN_URL = '/login/'
+diff --git a/templates/base.html b/templates/base.html
+index 19325fa..a565f38 100644
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -13,10 +13,10 @@
+             <div class="navbar-nav ms-auto">
+                 {% if user.is_authenticated %}
+                     <span class="navbar-text me-3">{{ user.username }}</span>
+-                    <a class="nav-link" href="#">退出</a>
++                    <a class="nav-link" href="{% url 'logout' %}">退出</a>
+                 {% else %}
+                     <a class="nav-link" href="{% url 'register' %}">注册</a>
+-                    <a class="nav-link" href="#">登录</a>
++                    <a class="nav-link" href="{% url 'login' %}">登录</a>
+                 {% endif %}
+             </div>
+         </div>
+diff --git a/templates/index.html b/templates/index.html
+index b7e12d7..041413d 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -20,7 +20,7 @@
+         <p class="lead mt-4">请注册或登录以使用平台功能。</p>
+         <div class="mt-3">
+             <a href="{% url 'register' %}" class="btn btn-primary me-2">注册</a>
+-            <a href="#" class="btn btn-outline-primary">登录</a>
++            <a href="{% url 'login' %}" class="btn btn-outline-primary">登录</a>
+         </div>
+     {% endif %}
+ </div>
+{% extends 'base.html' %}
+
+{% block title %}登录 - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-5 col-lg-4">
+        <h2 class="mb-4 text-center">登录</h2>
+
+        <form method="post" novalidate>
+            {% csrf_token %}
+
+            {% if form.non_field_errors %}
+                <div class="alert alert-danger">
+                    {% for error in form.non_field_errors %}
+                        {{ error }}
+                    {% endfor %}
+                </div>
+            {% endif %}
+
+            <div class="mb-3">
+                <label for="{{ form.student_id.id_for_label }}" class="form-label">{{ form.student_id.label }}</label>
+                {{ form.student_id }}
+                {% if form.student_id.errors %}
+                    <div class="text-danger mt-1">
+                        {% for error in form.student_id.errors %}
+                            {{ error }}
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+
+            <div class="mb-3">
+                <label for="{{ form.password.id_for_label }}" class="form-label">{{ form.password.label }}</label>
+                {{ form.password }}
+                {% if form.password.errors %}
+                    <div class="text-danger mt-1">
+                        {% for error in form.password.errors %}
+                            {{ error }}
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+
+            <button type="submit" class="btn btn-primary w-100">登录</button>
+        </form>
+
+        <p class="mt-3 text-center">
+            还没有账号？<a href="{% url 'register' %}">立即注册</a>
+        </p>
+    </div>
+</div>
+{% endblock %}
