@@ -3,7 +3,7 @@ from django.core.validators import RegexValidator
 from .models import User
 
 student_id_validator = RegexValidator(
-    regex=r'^\d{4,20}$',
+    regex=r'^[0-9]{4,20}$',
     message='学号格式不正确，应为 4–20 位数字',
 )
 
@@ -79,7 +79,10 @@ class VerificationForm(forms.Form):
             'class': 'form-control',
             'readonly': True,
         }),
-        error_messages={'required': '请输入学号'},
+        error_messages={
+            'required': '请输入学号',
+            'max_length': '学号长度不能超过 20 位',
+        },
     )
     name = forms.CharField(
         label='姓名',

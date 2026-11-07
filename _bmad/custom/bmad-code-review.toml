@@ -1,0 +1,18 @@
+# 团队级代码审查精简配置
+# 仅保留 Edge Case Hunter（边界条件）+ Acceptance Auditor（AC 合规）
+# Blind Hunter 和 Verification Gap 已禁用（产出/消耗比低）
+#
+# 高风险 Story（订单状态机、权限、退款）如需全层审查，
+# 在审查时手动将对应层的 instruction 改为非空字符串即可。
+
+[[workflow.review_layers]]
+id = "blind-hunter"
+name = "Blind Hunter"
+instruction = ""
+
+[[workflow.review_layers]]
+id = "verification-gap"
+name = "Verification Gap Reviewer"
+instruction = ""
+
+# edge-case-hunter 和 acceptance-auditor 未覆盖，继承 customize.toml 默认配置

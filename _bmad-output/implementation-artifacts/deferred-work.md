@@ -35,3 +35,7 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-4-学号身份认证-用户提交.md`
   summary: `VerificationRequestAdmin.save_model` 覆盖路径无独立测试 — 该路径逻辑与 `approve_requests` action 完全一致，当前功能已验证；若未来 save_model 逻辑与 action 分叉（如增加 side effect），需单独添加测试覆盖。
   evidence: review triage log low finding — save_model only tested implicitly via action test
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-4-学号身份认证-用户提交.md`
+  summary: 条件唯一约束（`UniqueConstraint` + `condition=Q(status='pending')`）在 MySQL 8.4 生产后端被 Django 静默跳过 — `supports_partial_indexes=False`，`accounts/views.py:105-110` 的 `except IntegrityError` 并发兜底永不触发，并发提交可写入两条 pending。
+  evidence: deferred reason — 演示项目不切 MySQL（课堂作业/演示用途，生产不会切到 MySQL 8.4，当前 SQLite 下约束有效）；若未来切换生产后端，须先重新设计该约束。

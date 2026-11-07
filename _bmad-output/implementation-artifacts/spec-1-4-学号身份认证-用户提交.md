@@ -92,6 +92,27 @@ context:
 - Given 管理员在 Django 管理后台通过认证申请，When 审核通过，Then `User.is_verified=True` 且导航栏显示「✓ 已认证」
 - Given `is_verified=True` 的用户，When 浏览任意页面，Then 导航栏昵称旁显示「✓ 已认证」绿色标识
 
+### Review Findings
+
+> 2026-11-07 ad hoc code review（`/bmad-code-review`），范围 `ccdc56e..HEAD`，模式 `full`；生效审查层：Edge Case Hunter + Acceptance Auditor（团队精简配置）。
+
+**Patch**
+
+- [x] [Review][Patch] `\d` 匹配 Unicode 数字，非 ASCII 学号可通过格式校验入库 [accounts/forms.py:5-8] — 实测 `re.search(r'^\d{4,20}$', '２０２４００１')` 为 True；`student_id` 为 `disabled=True`，表单取 `initial` 值校验后 `is_valid()` 为 True，全角数字与阿拉伯-印度数字学号会写入 `VerificationRequest`。与 spec「仅允许数字」的意图不符。已修复：正则收紧为 `^[0-9]{4,20}$`。
+- [x] [Review][Patch] `student_id` 缺 `max_length` 中文错误文案，超长学号页面出现英文 [accounts/forms.py:73-83] — `config/settings.py:112` 为 `LANGUAGE_CODE='en-us'`，实测 21 位学号的表单错误为 `['学号格式不正确，应为 4–20 位数字', 'Ensure this value has at most 20 characters (it has 21).']`，违反 Always「所有用户可见文本使用中文」。已修复：补 `error_messages={'max_length': '学号长度不能超过 20 位'}`。
+
+**Defer**
+
+- [x] [Review][Defer] 条件唯一约束在 MySQL 上被 Django 静默跳过，「数据库层双保险」在生产后端不成立 [accounts/models.py:42-48] — deferred: 演示项目不切 MySQL（课堂作业/演示用途，生产不会切到 MySQL 8.4，当前 SQLite 下约束有效）；若未来切换生产后端，须先重新设计该约束。`accounts/models.py:42-48` 与 `accounts/migrations/0002_verificationrequest.py` 定义 `UniqueConstraint(condition=Q(status='pending'))`，`accounts/views.py:105-110` 依赖 `except IntegrityError` 兜底并发重复提交。实测 Django 5.2.19：SQLite `supports_partial_indexes=True`（约束生效，重复 pending 抛 `IntegrityError`），MySQL `supports_partial_indexes=False`（迁移时约束被跳过，兜底分支永不触发）。`project-context.md` 标注 MySQL 8.4 为可选生产后端；一旦切换，并发提交可写入两条 pending，破坏 Always「同一用户只能有一个 pending 状态的申请」，并使下游 `is_verified` 授权依据不可靠。
+
+**Rejected**
+
+- `low` → rejected — 已存在 `approved` 申请但 `is_verified=False` 时会新建 pending 申请：正常流程中 `approve_requests` 与 `save_model` 均同步 `is_verified=True`，`views.py:69` 已挡住已认证用户；仅管理员在 UserAdmin 手动撤销认证后可达，此时保留 approved 历史并新建申请符合「一人可多次申请」的数据模型，不违反任何 AC。修复需新增守卫分支，日常几乎不会遇到，收益不抵复杂度。
+- `false` → rejected — `approve_requests` 缺少 `transaction.atomic()` 会导致状态不一致：两次 save 均为单表单行 UPDATE，未展示任何可达的 `user.save()` 失败路径；且该 action 幂等可重入，重跑即可补齐 `is_verified`，不一致状态不会持久（与既有 Review Triage Log 结论一致）。
+- `false` → rejected — 后台编辑产生重复 pending 时 `IntegrityError` 未捕获导致 500：实测 Django 5.2 `BaseModelForm._post_clean` 调用 `full_clean(validate_constraints=True)`，`UniqueConstraint.validate()` 在表单层返回 `Constraint "unique_pending_verification_per_user" is violated.`，不会穿透到视图层；SQLite 下数据库约束亦实测生效，不产生 500。
+- `low` → rejected — Design Notes 伪代码 `request.user.is_verified = True` 与实际代码语义矛盾：属 spec 文档措辞问题，修复方式是编辑被审查的 spec 本身（工作流规定此类发现不予保留）；实际代码使用 `verification.user.is_verified = True`，符合 AC4。
+- `false` → rejected — AC4 缺「审核通过 → 导航栏 ✓ 已认证」端到端测试：`test_admin_approve_action_syncs_is_verified` 已断言 action 写入 `user.is_verified`，`test_verified_badge_shown_in_navbar` 已断言 `is_verified=True` 时渲染徽标；模板直接读 `user.is_verified`，两者之间不存在未测试的中间逻辑，未展示任何能让徽标出错而两个测试仍通过的改动。
+
 ## Implementation Notes
 
 - `accounts/models.py`：新增 `VerificationRequest`（含 `unique_pending_verification_per_user` 条件唯一约束）；迁移 `accounts/migrations/0002_verificationrequest.py`。
