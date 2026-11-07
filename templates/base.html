@@ -12,7 +12,13 @@
             <a class="navbar-brand" href="{% url 'home' %}">校园二手书</a>
             <div class="navbar-nav ms-auto">
                 {% if user.is_authenticated %}
-                    <span class="navbar-text me-3">{{ user.username }}</span>
+                    <span class="navbar-text me-2">{{ user.username }}</span>
+                    {% if user.is_verified %}
+                        <span class="navbar-text me-3"><span class="badge bg-success">✓ 已认证</span></span>
+                    {% else %}
+                        <span class="navbar-text me-1"><span class="badge bg-warning text-dark">待认证</span></span>
+                        <a class="nav-link d-inline-block me-2" href="{% url 'verify' %}">去认证</a>
+                    {% endif %}
                     <form action="{% url 'logout' %}" method="post" class="d-inline">{% csrf_token %}<button type="submit" class="nav-link btn btn-link border-0">退出</button></form>
                 {% else %}
                     <a class="nav-link" href="{% url 'register' %}">注册</a>

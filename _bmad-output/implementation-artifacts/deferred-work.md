@@ -29,3 +29,9 @@
 
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-2-用户注册.md`
   summary: 导航栏中存在死链接（登录/退出 `href="#"`） — 登录/登出功能属 story 1.3，占位链接预期在该 story 中激活。
+
+## Deferred from: code review of spec-1-4-学号身份认证-用户提交 (2026-11-07)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-4-学号身份认证-用户提交.md`
+  summary: `VerificationRequestAdmin.save_model` 覆盖路径无独立测试 — 该路径逻辑与 `approve_requests` action 完全一致，当前功能已验证；若未来 save_model 逻辑与 action 分叉（如增加 side effect），需单独添加测试覆盖。
+  evidence: review triage log low finding — save_model only tested implicitly via action test

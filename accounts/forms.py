@@ -1,5 +1,11 @@
 from django import forms
+from django.core.validators import RegexValidator
 from .models import User
+
+student_id_validator = RegexValidator(
+    regex=r'^\d{4,20}$',
+    message='学号格式不正确，应为 4–20 位数字',
+)
 
 
 class LoginForm(forms.Form):
@@ -61,3 +67,29 @@ class RegisterForm(forms.ModelForm):
         if password and password_confirm and password != password_confirm:
             self.add_error('password_confirm', '两次输入的密码不一致')
         return cleaned_data
+
+
+class VerificationForm(forms.Form):
+    student_id = forms.CharField(
+        label='学号',
+        max_length=20,
+        disabled=True,
+        validators=[student_id_validator],
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'readonly': True,
+        }),
+        error_messages={'required': '请输入学号'},
+    )
+    name = forms.CharField(
+        label='姓名',
+        max_length=30,
+        widget=forms.TextInput(attrs={
+            'class': 'form-control',
+            'placeholder': '请输入真实姓名',
+        }),
+        error_messages={
+            'required': '请输入姓名',
+            'max_length': '姓名长度不能超过 30 个字符',
+        },
+    )

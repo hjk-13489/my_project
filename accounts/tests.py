@@ -2,7 +2,7 @@ from django.test import TestCase
 from django.urls import reverse
 from django.db import IntegrityError
 from unittest.mock import patch
-from accounts.models import User
+from accounts.models import User, VerificationRequest
 
 
 class RegisterViewTests(TestCase):
@@ -265,3 +265,251 @@ class LogoutViewTests(TestCase):
         """配置验证：LOGIN_URL 设置正确"""
         from django.conf import settings
         self.assertEqual(settings.LOGIN_URL, '/login/')
+
+
+class VerificationViewTests(TestCase):
+
+    def setUp(self):
+        self.verify_url = reverse('verify')
+        self.home_url = reverse('home')
+        self.student_id = '2024004'
+        self.password = 'verifypass123'
+        self.user = User.objects.create_user(
+            student_id=self.student_id,
+            username='认证测试用户',
+            password=self.password,
+        )
+
+    def _login(self, student_id=None, password=None):
+        self.client.login(
+            username=student_id or self.student_id,
+            password=password or self.password,
+        )
+
+    def _make_user(self, student_id, username='其他认证用户', password='otherpass123'):
+        return User.objects.create_user(
+            student_id=student_id, username=username, password=password
+        )
+
+    def test_get_verify_page_renders_form_with_prefilled_student_id(self):
+        """GET 认证页：渲染表单并预填当前用户学号"""
+        self._login()
+        response = self.client.get(self.verify_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'accounts/verify.html')
+        self.assertContains(response, '学号认证')
+        self.assertContains(response, self.student_id)
+        self.assertContains(response, '请输入真实姓名')
+
+    def test_submit_creates_pending_request(self):
+        """正常提交：创建 pending 申请，is_verified 仍为 False，显示成功提示"""
+        self._login()
+        response = self.client.post(self.verify_url, {
+            'student_id': self.student_id,
+            'name': '张三',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '认证申请已提交')
+        request_obj = VerificationRequest.objects.get(user=self.user)
+        self.assertEqual(request_obj.status, 'pending')
+        self.assertEqual(request_obj.student_id, self.student_id)
+        self.assertEqual(request_obj.name, '张三')
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.is_verified)
+
+    def test_submit_ignores_tampered_student_id(self):
+        """学号只读：POST 中篡改的学号被忽略，仍使用当前用户学号"""
+        self._login()
+        self.client.post(self.verify_url, {
+            'student_id': '9999999',
+            'name': '张三',
+        })
+        request_obj = VerificationRequest.objects.get(user=self.user)
+        self.assertEqual(request_obj.student_id, self.student_id)
+
+    def test_duplicate_pending_request_rejected(self):
+        """已有 pending 申请时再次提交被拒绝"""
+        VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='pending'
+        )
+        self._login()
+        response = self.client.post(self.verify_url, {
+            'student_id': self.student_id,
+            'name': '李四',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '你已有待审核的认证申请')
+        self.assertEqual(VerificationRequest.objects.filter(user=self.user).count(), 1)
+        self.assertEqual(VerificationRequest.objects.get(user=self.user).name, '张三')
+
+    def test_get_verify_page_with_pending_request_shows_notice(self):
+        """已有 pending 申请时访问认证页显示等待审核提示"""
+        VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='pending'
+        )
+        self._login()
+        response = self.client.get(self.verify_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '认证申请已提交，等待管理员审核')
+
+    def test_non_numeric_student_id_rejected(self):
+        """学号含非数字字符被拒绝"""
+        user = self._make_user('abc123')
+        self._login('abc123', 'otherpass123')
+        response = self.client.post(self.verify_url, {'name': '张三'})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '学号格式不正确')
+        self.assertFalse(VerificationRequest.objects.filter(user=user).exists())
+
+    def test_too_short_student_id_rejected(self):
+        """学号长度小于 4 位被拒绝"""
+        user = self._make_user('123')
+        self._login('123', 'otherpass123')
+        response = self.client.post(self.verify_url, {'name': '张三'})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '学号格式不正确')
+        self.assertFalse(VerificationRequest.objects.filter(user=user).exists())
+
+    def test_too_long_student_id_rejected(self):
+        """学号长度大于 20 位被拒绝"""
+        user = self._make_user('1' * 21)
+        self._login('1' * 21, 'otherpass123')
+        response = self.client.post(self.verify_url, {'name': '张三'})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '学号格式不正确')
+        self.assertFalse(VerificationRequest.objects.filter(user=user).exists())
+
+    def test_empty_name_rejected(self):
+        """姓名为空被拒绝"""
+        self._login()
+        response = self.client.post(self.verify_url, {'name': ''})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '请输入姓名')
+        self.assertFalse(VerificationRequest.objects.filter(user=self.user).exists())
+
+    def test_whitespace_only_name_rejected(self):
+        """姓名仅含空白字符被拒绝"""
+        self._login()
+        response = self.client.post(self.verify_url, {'name': '   '})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '请输入姓名')
+        self.assertFalse(VerificationRequest.objects.filter(user=self.user).exists())
+
+    def test_unauthenticated_redirects_to_login(self):
+        """未登录访问认证页：302 跳转登录页并携带 next"""
+        response = self.client.get(self.verify_url)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.url,
+            '/login/?next=/verify/',
+        )
+
+    def test_verified_user_redirected_home(self):
+        """已认证用户访问认证页：302 重定向首页"""
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self._login()
+        response = self.client.get(self.verify_url)
+        self.assertRedirects(response, self.home_url)
+
+    def test_verified_user_post_redirected_home(self):
+        """已认证用户提交认证：302 重定向首页，不创建记录"""
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self._login()
+        response = self.client.post(self.verify_url, {'name': '张三'})
+        self.assertRedirects(response, self.home_url)
+        self.assertFalse(VerificationRequest.objects.filter(user=self.user).exists())
+
+    def test_rejected_request_can_be_resubmitted(self):
+        """被驳回后重新提交：更新原记录为 pending，不创建新记录"""
+        rejected = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='旧姓名', status='rejected'
+        )
+        self._login()
+        response = self.client.post(self.verify_url, {'name': '新姓名'})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '认证申请已提交')
+        self.assertEqual(VerificationRequest.objects.filter(user=self.user).count(), 1)
+        rejected.refresh_from_db()
+        self.assertEqual(rejected.status, 'pending')
+        self.assertEqual(rejected.name, '新姓名')
+
+    def test_rejected_request_get_renders_form(self):
+        """被驳回后访问认证页可再次渲染表单"""
+        VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='旧姓名', status='rejected'
+        )
+        self._login()
+        response = self.client.get(self.verify_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '提交认证申请')
+
+    def test_verified_badge_shown_in_navbar(self):
+        """已认证用户任意页面导航栏显示「✓ 已认证」"""
+        self.user.is_verified = True
+        self.user.save(update_fields=['is_verified'])
+        self._login()
+        response = self.client.get(self.home_url)
+        self.assertContains(response, '✓ 已认证')
+        self.assertNotContains(response, '去认证')
+
+    def test_pending_badge_and_entry_link_shown_in_navbar(self):
+        """未认证用户导航栏显示「待认证」及认证入口链接"""
+        self._login()
+        response = self.client.get(self.home_url)
+        self.assertContains(response, '待认证')
+        self.assertContains(response, f'href="{self.verify_url}"')
+
+    def test_home_page_unverified_shows_verify_entry(self):
+        """首页未认证文案：你的账号尚未认证 + 认证入口"""
+        self._login()
+        response = self.client.get(self.home_url)
+        self.assertContains(response, '你的账号尚未认证')
+        self.assertContains(response, f'href="{self.verify_url}"')
+
+    def test_admin_approve_action_syncs_is_verified(self):
+        """管理员后台「通过认证」操作同步 User.is_verified=True"""
+        verification = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='pending'
+        )
+        User.objects.create_superuser(
+            student_id='admin001', username='admin', password='adminpass123'
+        )
+        self.client.login(username='admin001', password='adminpass123')
+        response = self.client.post(
+            reverse('admin:accounts_verificationrequest_changelist'),
+            {
+                'action': 'approve_requests',
+                '_selected_action': [str(verification.pk)],
+            },
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        verification.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual(verification.status, 'approved')
+        self.assertTrue(self.user.is_verified)
+
+    def test_admin_reject_action_keeps_user_unverified(self):
+        """管理员后台「驳回」操作不改变 User.is_verified"""
+        verification = VerificationRequest.objects.create(
+            user=self.user, student_id=self.student_id, name='张三', status='pending'
+        )
+        User.objects.create_superuser(
+            student_id='admin002', username='admin2', password='adminpass123'
+        )
+        self.client.login(username='admin002', password='adminpass123')
+        response = self.client.post(
+            reverse('admin:accounts_verificationrequest_changelist'),
+            {
+                'action': 'reject_requests',
+                '_selected_action': [str(verification.pk)],
+            },
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        verification.refresh_from_db()
+        self.user.refresh_from_db()
+        self.assertEqual(verification.status, 'rejected')
+        self.assertFalse(self.user.is_verified)
