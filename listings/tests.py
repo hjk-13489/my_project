@@ -12,7 +12,7 @@ from django.urls import clear_url_caches, reverse
 from PIL import Image
 
 from accounts.models import User
-from listings.models import Product, ProductImage
+from listings.models import InvalidTransition, Product, ProductImage
 
 # 以临时目录隔离 media/，避免上传测试污染真实 media/ 与既有数据。
 _TEST_MEDIA_ROOT = tempfile.mkdtemp()
@@ -373,3 +373,152 @@ class PublishViewTests(TestCase):
         response = self.client.head(self.url)
         self.assertEqual(response.status_code, 200)
         self._assert_no_writes()
+
+
+@override_settings(MEDIA_ROOT=_TEST_MEDIA_ROOT)
+class ProductVisibilityTests(TestCase):
+    """Story 2.2：visible() 唯一门控与模型层状态流转的回归证据（不改既有 28 例）。"""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_TEST_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            student_id='2024101', username='卖家', password='test123456'
+        )
+        shutil.rmtree(_TEST_MEDIA_ROOT, ignore_errors=True)
+        os.makedirs(_TEST_MEDIA_ROOT, exist_ok=True)
+
+    def _create_product(self, status='pending', **kwargs):
+        data = {
+            'owner': self.user,
+            'title': '高等数学教材',
+            'description': '九成新，无笔记',
+            'price': Decimal('25.00'),
+            'condition': '良好',
+            'category': '教材',
+            'status': status,
+        }
+        data.update(kwargs)
+        return Product.objects.create(**data)
+
+    # ---------- 四态可见性 ----------
+    def test_pending_not_visible_but_in_base_queryset(self):
+        product = self._create_product(status='pending')
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 0)
+        self.assertEqual(Product.objects.count(), 1)  # 基础查询集本身不过滤
+
+    def test_visible_returns_only_approved(self):
+        self._create_product(status='pending')
+        approved = self._create_product(status='approved')
+        self._create_product(status='rejected')
+        self._create_product(status='offline')
+        self.assertEqual(Product.objects.count(), 4)
+        self.assertEqual(list(Product.objects.visible()), [approved])
+
+    def test_offline_not_visible(self):
+        product = self._create_product(status='offline')
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 0)
+
+    # ---------- 合法转移：状态变更持久化，visible() 即刻命中 ----------
+    def test_approve_persists_and_becomes_visible(self):
+        product = self._create_product(status='pending')
+        product.approve()
+        self.assertEqual(product.status, 'approved')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'approved')
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 1)
+
+    def test_reject_persists_and_stays_invisible(self):
+        product = self._create_product(status='pending')
+        product.reject()
+        self.assertEqual(product.status, 'rejected')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 0)
+
+    def test_status_change_needs_no_query_code_change(self):
+        """同一商品 pending → approved 后 visible() 自动命中，无需改任何查询代码。"""
+        product = self._create_product(status='pending')
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 0)
+        product.approve()
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 1)
+
+    # ---------- 非法转移：显式拒绝、保持原状态、不落库 ----------
+    def test_approve_from_non_pending_raises_and_no_write(self):
+        for status in ('approved', 'rejected', 'offline'):
+            with self.subTest(status=status):
+                product = self._create_product(status=status)
+                product.refresh_from_db()
+                original_updated_at = product.updated_at
+                with self.assertRaises(InvalidTransition):
+                    product.approve()
+                self.assertEqual(product.status, status)  # 内存状态未改
+                product.refresh_from_db()
+                self.assertEqual(product.status, status)  # DB 状态未改
+                self.assertEqual(product.updated_at, original_updated_at)  # 未落库
+
+    def test_reject_from_non_pending_raises(self):
+        for status in ('approved', 'rejected', 'offline'):
+            with self.subTest(status=status):
+                product = self._create_product(status=status)
+                with self.assertRaises(InvalidTransition):
+                    product.reject()
+                self.assertEqual(product.status, status)
+                product.refresh_from_db()
+                self.assertEqual(product.status, status)
+
+    def test_transition_to_undefined_target_raises_and_no_write(self):
+        """pending → offline 等未定义目标态统一走 InvalidTransition（含中文异常）。"""
+        product = self._create_product(status='pending')
+        product.refresh_from_db()
+        original_updated_at = product.updated_at
+        with self.assertRaises(InvalidTransition) as ctx:
+            product._transition('offline')
+        self.assertIn('非法状态流转', str(ctx.exception))
+        self.assertIn('待审核', str(ctx.exception))
+        self.assertEqual(product.status, 'pending')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(product.updated_at, original_updated_at)
+
+    def test_illegal_transition_message_is_chinese(self):
+        product = self._create_product(status='approved')
+        with self.assertRaises(InvalidTransition) as ctx:
+            product.approve()
+        self.assertIn('非法状态流转', str(ctx.exception))
+        self.assertIn('已上架', str(ctx.exception))
+
+    # ---------- 链式组合 ----------
+    def test_visible_chains_with_filter(self):
+        approved_textbook = self._create_product(status='approved', category='教材')
+        self._create_product(status='approved', category='日用品')
+        self._create_product(status='pending', category='教材')
+        result = Product.objects.visible().filter(category='教材')
+        self.assertEqual(list(result), [approved_textbook])
+        self.assertEqual(result.count(), 1)
+        # visible() 挂在自定义 QuerySet 上，filter() 之后仍可调用
+        self.assertEqual(Product.objects.filter(category='教材').visible().count(), 1)
+
+    # ---------- 发布回归 ----------
+    def test_publish_regression_still_pending_and_invisible(self):
+        self.user.is_verified = True
+        self.user.save()
+        self.client.login(username='2024101', password='test123456')
+        response = self.client.post(
+            reverse('publish'),
+            {
+                'title': '高等数学教材',
+                'description': '九成新，无笔记',
+                'price': '25.00',
+                'condition': '良好',
+                'category': '教材',
+                'images': [_make_image()],
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        product = Product.objects.get()
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 0)

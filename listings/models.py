@@ -2,6 +2,18 @@ from django.conf import settings
 from django.db import models
 
 
+class InvalidTransition(Exception):
+    """商品状态非法流转：显式拒绝，保持原状态且不落库。"""
+
+
+class ProductQuerySet(models.QuerySet):
+    """商品查询集：对外可见性的唯一定义。"""
+
+    def visible(self):
+        """返回且仅返回已上架（approved）商品，可继续链式 filter() 等操作。"""
+        return self.filter(status='approved')
+
+
 class Product(models.Model):
     """商品：卖家发布的闲置物品，提交后默认待审核（pending）。"""
 
@@ -22,6 +34,14 @@ class Product(models.Model):
         ('rejected', '已驳回'),
         ('offline', '已下架'),
     ]
+    # 状态流转唯一定义：仅 pending 可流转到 approved / rejected；
+    # approved → offline（5.2）、rejected → pending（2.3）留给后续故事。
+    ALLOWED_TRANSITIONS = {
+        'pending': ('approved', 'rejected'),
+        'approved': (),
+        'rejected': (),
+        'offline': (),
+    }
 
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -40,6 +60,9 @@ class Product(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='创建时间')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='更新时间')
 
+    # 只追加 visible() 等方法，基础查询集不过滤，admin / 卖家本人 / 既有代码不受影响。
+    objects = ProductQuerySet.as_manager()
+
     class Meta:
         verbose_name = '商品'
         verbose_name_plural = '商品'
@@ -47,6 +70,27 @@ class Product(models.Model):
 
     def __str__(self):
         return f'{self.title}（{self.get_status_display()}）'
+
+    # ---------- 状态流转（模型层唯一入口）----------
+    def approve(self):
+        """审核通过：pending → approved。"""
+        self._transition('approved')
+
+    def reject(self):
+        """审核驳回：pending → rejected。"""
+        self._transition('rejected')
+
+    def _transition(self, target):
+        """执行合法转移并持久化；非法转移抛 InvalidTransition，不改动状态、不落库。"""
+        allowed = self.ALLOWED_TRANSITIONS.get(self.status, ())
+        if target not in allowed:
+            target_display = dict(self.STATUS_CHOICES).get(target, target)
+            raise InvalidTransition(
+                f'非法状态流转：当前为「{self.get_status_display()}」，'
+                f'不能流转到「{target_display}」'
+            )
+        self.status = target
+        self.save(update_fields=['status', 'updated_at'])
 
 
 class ProductImage(models.Model):
