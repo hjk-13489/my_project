@@ -83,6 +83,24 @@ context:
 - Given 2.1 发布页与 1.1–1.5 的既有用例，When 运行完整测试套件，Then 90 个既有用例仍全部通过，且 `makemigrations --check --dry-run` 为 `No changes detected`。
 - Given 交付范围，When 查看 diff，Then 不含任何新 URL / 视图 / 模板 / 迁移 / 审核界面，`listings/admin.py` 保持不变。
 
+### Review Findings
+
+> 2026-11-08 15:45 独立代码审查（`/bmad-code-review`，full 模式；启用 Edge Case Hunter + Acceptance Auditor，Blind Hunter / Verification Gap 按团队配置禁用）。基准 `5476e41..HEAD`（`43a4423`），diff 6 文件 / 504 行 / +414-3。共 9 条原始发现（EC 4 / AA 5）→ **9 条全部驳回，0 decision-needed、0 patch、0 defer**，`review_loop_iteration` 保持 0。独立复验：`check` → 0 issues；`makemigrations --check --dry-run` → No changes detected；`manage.py test` → 102 tests OK；`git diff 5476e41..HEAD -- listings/admin.py` 为空；`git diff --name-status` 中代码文件仅 `listings/models.py` / `listings/tests.py`。
+
+**Rejected**
+
+- EC-1 `low` — 「未保存实例调用 `approve()` 先改内存 `status` 再抛 `ValueError`」：Django `base.py:1114` 确有该行为，但全仓 `approve()/reject()/_transition()` 的调用点只有 `listings/tests.py`（7 处，均为已持久化实例），交付程序无该路径；修复需新增 `pk` 守卫分支，属新增状态而非直接修正，按 low 驳回规则 reject。
+- EC-2 `low` — 「陈旧实例 / 并发写入可让非法转移静默生效」：机制成立（`_transition()` 只读内存 `self.status`），但无生产调用者、无 admin action、无审核界面；修复需 `select_for_update` / 条件 `update()` 等 DB 端守卫。与 AA-2 同根因；**遗留：5.1 引入真实审核调用者时必须补 DB 端校验**（沿用 build 阶段 BH-7 / EC-2 裁决）。
+- EC-3 `false` — 「`update_fields` 丢弃调用者其他未保存字段修改」：7 个调用点均为裸 `product.approve()/reject()/_transition()`，前置无任何字段赋值，不存在被丢弃的编辑；且 `update_fields=['status','updated_at']` 是冻结规格 Code Map 指定的写入范式。
+- EC-4 `false` — 「不可哈希 `target` / `status` 导致 `TypeError`」：持久化实例的 `self.status` 恒为 choices 四值之一的字符串，`target` 恒为 `approve()/reject()` 内字面量或私有方法唯一外部调用（`tests.py:479`）传入的 `'offline'`；无可达路径构造不可哈希输入。
+- AA-1 `false` — 「交付 diff 与规格声称的 388 行 / 4 文件基准不一致，17 条结论未覆盖实际交付物」：388 行 / 29.0 kB 描述的是 build 阶段 Step 3/4 的工作树快照；实现提交 `e684fce` 确为 4 个文件（337+/3-），随后 `43a4423` 才追加 `decision-log.md` 与 memory 两份过程日志，故 D-032 / D-037 的范围断言成立；AC-5 只约束 URL/视图/模板/迁移/审核界面与 `admin.py`，实测未变。
+- AA-2 `low` — 「冻结 Always 无条件要求非法转移不落库，实现只按内存态判定」：见 EC-2；AC-3 的前置条件按实例状态求值，交付范围内四态均已被 4 个非法转移用例覆盖；修复需新增并发守卫或改写冻结规格，均非直接修正。
+- AA-3 `false` — 「BH-11 的『`status='approved'` 仅 `visible()` 一处』证据自相矛盾」：冻结 Never 约束的是「字面量**查询**」；仓内 `filter(status=...)` / `Q(status=...)` grep 只有 `listings/models.py:14` 一处 `approved` 过滤（另一处是 accounts 的 `Q(status='pending')` 约束），其余出现均为 `create(...)` / `_create_product(...)` 夹具构造而非查询，BH-11 依据未被推翻。
+- AA-4 `false` — 「AC-4 / AC-5 只有文字断言、无可复现验证产物」：本轮用 `.venv/Scripts/python.exe` 独立复跑 `check` / `makemigrations --check --dry-run` / `test`，分别得 0 issues / No changes detected / 102 tests OK；AC-5 由 `git diff --name-status` 与 `admin.py` 空 diff 直接复核，验收结果可从交付树复现，Commands 少一行不改变该事实（且修复=编辑本规格）。
+- AA-5 `false` — 「规格状态记述 `done` / `in-progress` / `in-review` 互斥」：Implementation Notes 按模板 append-only 保留阶段中间态，L119 已明确「以本条为最终口径」；frontmatter `status: done` 与 sprint 的 `review` 分属不同工作流阶段，与 spec-2-1 惯例一致，修复=编辑本规格。
+
+**分组与处置：** 无存活项（6 条 `false`、3 条 `low → rejected`），无需分组与路由；无 `decision_needed` / `patch` / `defer`，不触发 loopback。
+
 ## Implementation Notes
 
 - 实现按冻结规格完成，仅改动 3 个文件：`listings/models.py`、`listings/tests.py`、`sprint-status.yaml`（另本规格做状态同步）。未改字段定义、`ProductImage`、`STATUS_CHOICES`、迁移、`listings/admin.py`（保持 2.1 裸注册）、`listings/views.py`、`listings/urls.py`、`config/urls.py`、`config/settings.py`、`accounts/*`、全部模板、`db.sqlite3` 与 `media/`；未新增任何 URL / 视图 / 模板 / 迁移 / 审核界面。
