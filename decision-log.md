@@ -361,3 +361,69 @@
     *   依据 2：引入幂等 token 会与已冻结的成功态体验冲突，改动面与回归风险大于收益；重复数据可留待 2.4「我的发布」/ 5.1 管理员界面提供删除能力后再处理，属于可用后续故事兜住的代价。
 *   **结果**：该组由 `decision-needed` 转 `rejected`；9 条发现全部驳回，**0 patch、0 defer、无代码改动**。风险与实测证据写入 `spec-2-1-发布商品-含图片上传.md` 的 `### Review Findings` 与 `Review Triage Log`；spec 状态确认为 `done`，`sprint-status.yaml` 的 `2-1` 由 `review` 置 `done`、`last_updated: 11-08-2026 13:31`。
 *   **事后验证**：收尾复验 `manage.py test` → 90 tests OK、`check` 无问题、`makemigrations --check --dry-run` → No changes detected；遗留风险待 2.4 / 5.1 提供管理界面后处理，属尚未验证的后续项。
+
+---
+## D-032: 接受工具注入的未跟踪技能目录，保持原状继续（否决删除/忽略/单独提交）
+
+*   **触发阶段**：`/bmad-build` Step 1（Story 2.2 版本控制检查，2026-11-08 13:42）
+*   **智能体的建议**：检出工作树不干净——200+ 个未跟踪文件全部是本次会话由工具注入的 `.workbuddy/skills/`（BMAD 技能包，13:40 生成），非用户代码。按工作流「dirty tree 必须 HALT」暂停，给出三选项（保持原状继续 / 加入 .gitignore / 单独提交技能包），推荐保持原状；并说明 `.workbuddy/` 属项目数据目录、不可删除（与 D-025「删除遗留临时文件」的情形不同）。
+*   **我们的判断与依据**：**采纳（保持原状继续）**。
+    *   依据 1：这些是工具自带文件、非本次交付物，删除会破坏技能链，忽略只是把问题藏起来（D-025 已否决该做法），单独提交会把 200+ 无关文件写进仓库历史。
+    *   依据 2：后续只显式暂存 Story 2.2 相关文件即可保证 diff/提交不含夹带，工作树在其余路径上干净。
+*   **结果**：基线锁定 `5476e41`（master，最近提交为 Story 2.1 审查收尾），story key 定为 `2-2-商品状态流转-待审核-上架-驳回`；提交时仅暂存 4 个故事文件。
+*   **事后验证**：Step 3/4 生成的 388 行 / 29.0 kB 完整 diff 只含 `listings/models.py`、`listings/tests.py`、spec 与 `sprint-status.yaml`，未夹带技能目录。
+
+---
+## D-033: 规格超长时保留完整、不拆分（第二次确认 D-029 尺度）
+
+*   **触发阶段**：`/bmad-build` Step 2（Story 2.2 长度门槛）
+*   **智能体的建议**：规格 8,837 字符、约 2.2k tokens，超 1600 建议上限。给出两选项（保留完整 / 把「状态流转方法 + 非法转移拒绝」拆出并延后到 deferred-work.md），推荐保留完整；提示长上下文尾部细节可能被忽略，由 Step 4 三层审查兜底。
+*   **我们的判断与依据**：**采纳（保留完整）**。
+    *   依据 1：模型层门控、状态机、测试、Code Map 同属「状态流转 + 可见性唯一定义」这一个可交付目标，拆出次级项会制造「可独立交付」的假象，还会把故事标题里的「状态流转」割裂。
+    *   依据 2：与 D-029 一致，完整 Code Map 让实现代理不必重新搜代码；context-rot 风险交给三层审查，而非靠删内容规避。
+*   **结果**：不拆分、不新增 deferred 项；冻结区保留完整 8 行 I/O 矩阵与 12 条 Code Map。
+*   **事后验证**：实现代理一次跑通 102 个用例，无需返工搜代码；三层审查 17 条发现中 0 项 `intent_gap` / `bad_spec`，冻结矩阵未被误读，context-rot 风险未兑现。
+
+---
+## D-034: 2.2 只做模型层门控，不新增任何页面/URL（否决加列表页/调试页）
+
+*   **触发阶段**：`/bmad-build` Step 2（Open Question 1，交付形态）
+*   **智能体的建议**：当前仓库没有任何商品列表/搜索/详情页（属 2.5–2.8），`Product` 只出现在发布路径；若只做模型层，「普通用户查不到 pending 」只能由 `visible()` 与测试断言验证，浏览器里看不到变化。三选项：只做模型层 / 加最小商品列表页 / 加调试可见性页，推荐只做模型层。
+*   **我们的判断与依据**：**采纳（只做模型层）**。
+    *   依据 1：`epic-2-context.md:35` 要求可见性归 `listings` 唯一定义、2.5–2.8 共用同一套过滤；提前建页面会侵入后续故事范围并产生两套查询，2.5 需返工。
+    *   依据 2：课堂演示中「先审后上架」的门控本就该是服务端能力，页面只是消费者；本次没有肉眼可见变化是可接受的阶段结果。
+*   **结果**：冻结区 Never 明确「不新增任何 URL / 视图 / 模板 / 迁移 / 审核界面」；验收锚定 `Product.objects.visible().filter(id=pid).count() == 0` 与 12 个新增用例。
+*   **事后验证**：Step 3 读入完整 diff 核对范围 AC 通过；`makemigrations --check --dry-run` → No changes detected，无新增路由与模板。
+
+---
+## D-035: 状态流转下沉模型层、不改 admin（否决「只加 visible()」与「提前做审核界面」）
+
+*   **触发阶段**：`/bmad-build` Step 2（Open Question 2，流转层级）
+*   **智能体的建议**：故事标题含「待审核→上架/驳回」但 AC 只断言 `visible()`；epic-2-context 明确审核界面属 5.1，而 `listings/admin.py` 是裸注册、管理员可直接编辑 `status`（2.1 审查 BH-6 / EC-5 已记为已知取舍）。三选项：模型层 `approve()`/`reject()` + 不改 admin / 只加 `visible()` 不建状态机 / 模型层方法 + admin 只读与 action，推荐第一项。
+*   **我们的判断与依据**：**采纳（模型层方法 + 不改 admin）**。
+    *   依据 1：只加 `visible()` 会让 2.3 / 5.1 / 5.2 各自直接赋值 status，违反架构「业务规则下沉 Models、视图只做编排」；把 admin 锁住或加 action 等于提前实现 5.1，越界风险最大。
+    *   依据 2：admin 可绕过状态机只影响状态写入路径，`visible()` 只看最终状态值，门控本身仍成立；与 2.1 的低危取舍裁决一致。
+*   **结果**：`ALLOWED_TRANSITIONS` 与 `approve()`/`reject()`/`_transition()` 全部落在 `listings/models.py`，`InvalidTransition` 模块级定义；`listings/admin.py` 一字未改。
+*   **事后验证**：`test_visible_returns_only_approved` 用 `create(status=...)` 直接绕过状态机构造四态，断言仅 approved 命中，反向回归成立；三层审查 BH-11 据此驳回。
+
+---
+## D-036: 合法转移表只定义两条，不提前固化后续故事规则
+
+*   **触发阶段**：`/bmad-build` Step 2（Open Question 3，转移表范围）
+*   **智能体的建议**：四态中 2.3 需要 `rejected → pending`（重提）、5.2 需要 `approved → offline`（下架）。两选项：本次只定义 `pending → approved/rejected` / 一次定义四态完整转移表，推荐前者。
+*   **我们的判断与依据**：**采纳（只定义两条）**。
+    *   依据 1：贴合 2.2 标题，不替 2.3 / 5.2 固化尚未拍板的业务意图；后续接入只需在表中增项并补各自 AC，不动 `visible()`。
+    *   依据 2：本次没有对应 AC 可验收，提前写完的完整表反而会成为未经审批的隐藏约束。
+*   **结果**：`ALLOWED_TRANSITIONS` 对 `approved/rejected/offline` 给空元组，非 pending 再流转或跳到 `offline` 统一走 `InvalidTransition`。
+*   **事后验证**：4 个非法转移用例全绿；三层审查 BH-6 关于「5.1 缺 `pending()` 入口」的发现因混淆「可见性唯一定义」与 admin 侧 pending 查询被驳回，未诱发返工。
+
+---
+## D-037: CHECKPOINT 1 批准并在同会话完成实现与审查；接受三层审查零补丁结论
+
+*   **触发阶段**：`/bmad-build` Step 2 → Step 5（Story 2.2 规格批准与收尾）
+*   **智能体的建议**：规格已写完、Open Questions 清空、四项决策冻结。CHECKPOINT 1 给出三选项（批准并继续 / 批准但先停下 / 先用子代理审规格），推荐同会话继续；Step 4 三层审查后汇总 17 条发现，逐条核验建议全部驳回、0 patch / 0 defer / 无 loopback。
+*   **我们的判断与依据**：**采纳（批准并继续；认可零补丁结论）**。
+    *   依据 1：意图缺口已全部由人类拍板，再开一轮规格审查边际收益低；同会话可避免上下文重建，符合 D-030 的选择。
+    *   依据 2：17 条发现中 12 条为 `false`（多数修复=编辑被审查规格，或已被现有用例覆盖）、5 条为 `low → rejected`（并发/未保存实例等路径在交付程序中不可达，且修复需新增守卫而非直接修正）；全仓 grep 证实 `approve()`/`reject()` 除测试外无调用者。
+*   **结果**：spec `status: done`，`sprint-status.yaml` 的 `2-2` → `review`；实现提交只含 4 个故事文件。审查日志逐条写入 spec 的 `Review Triage Log`，`review_loop_iteration` 保持 0。
+*   **事后验证**：`manage.py check` 无问题、`makemigrations --check --dry-run` → No changes detected、`test -v 2` → **102 tests OK**（90 既有 + 12 新增），无失败/跳过。**遗留风险**：5.1 引入真实审核调用者后需补 DB 端并发校验；sprint 的 `done` 待独立代码审查收尾写入。
