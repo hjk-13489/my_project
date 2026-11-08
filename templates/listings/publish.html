@@ -1,0 +1,102 @@
+{% extends 'base.html' %}
+
+{% block title %}发布商品 - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8 col-lg-7">
+        <h2 class="mb-4 text-center">发布商品</h2>
+
+        {% if needs_verification %}
+            <div class="alert alert-warning" role="alert">
+                <h5 class="alert-heading">需先完成学号认证</h5>
+                <p class="mb-3">发布商品前需要先完成学号身份认证，审核通过后即可发布闲置商品。</p>
+                <a href="{% url 'verify' %}" class="btn btn-warning">去认证</a>
+            </div>
+        {% elif submitted %}
+            <div class="alert alert-success" role="alert">
+                已提交，等待管理员审核。审核通过后商品才会对外展示。
+            </div>
+            <div class="d-grid">
+                <a href="{% url 'publish' %}" class="btn btn-primary">继续发布商品</a>
+            </div>
+        {% else %}
+            <p class="text-muted">请填写商品信息并上传 1–5 张图片，提交后由管理员审核。</p>
+
+            <form method="post" enctype="multipart/form-data" novalidate>
+                {% csrf_token %}
+
+                {% if form.non_field_errors %}
+                    <div class="alert alert-danger">
+                        {% for error in form.non_field_errors %}{{ error }}<br>{% endfor %}
+                    </div>
+                {% endif %}
+
+                <div class="mb-3">
+                    <label for="{{ form.title.id_for_label }}" class="form-label">{{ form.title.label }}</label>
+                    {{ form.title }}
+                    {% if form.title.errors %}
+                        <div class="text-danger mt-1">
+                            {% for error in form.title.errors %}{{ error }}{% endfor %}
+                        </div>
+                    {% endif %}
+                </div>
+
+                <div class="mb-3">
+                    <label for="{{ form.description.id_for_label }}" class="form-label">{{ form.description.label }}</label>
+                    {{ form.description }}
+                    {% if form.description.errors %}
+                        <div class="text-danger mt-1">
+                            {% for error in form.description.errors %}{{ error }}{% endfor %}
+                        </div>
+                    {% endif %}
+                </div>
+
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <label for="{{ form.price.id_for_label }}" class="form-label">{{ form.price.label }}</label>
+                        {{ form.price }}
+                        {% if form.price.errors %}
+                            <div class="text-danger mt-1">
+                                {% for error in form.price.errors %}{{ error }}{% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <label for="{{ form.condition.id_for_label }}" class="form-label">{{ form.condition.label }}</label>
+                        {{ form.condition }}
+                        {% if form.condition.errors %}
+                            <div class="text-danger mt-1">
+                                {% for error in form.condition.errors %}{{ error }}{% endfor %}
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="{{ form.category.id_for_label }}" class="form-label">{{ form.category.label }}</label>
+                    {{ form.category }}
+                    {% if form.category.errors %}
+                        <div class="text-danger mt-1">
+                            {% for error in form.category.errors %}{{ error }}{% endfor %}
+                        </div>
+                    {% endif %}
+                </div>
+
+                <div class="mb-3">
+                    <label for="id_images" class="form-label">商品图片（1–5 张，仅 JPEG/PNG，单张不超过 5MB）</label>
+                    <input type="file" name="images" id="id_images" class="form-control" multiple accept="image/jpeg,image/png">
+                </div>
+
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-primary">提交发布</button>
+                </div>
+            </form>
+        {% endif %}
+
+        <p class="mt-3 text-center">
+            <a href="{% url 'home' %}">返回首页</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

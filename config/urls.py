@@ -15,6 +15,8 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.shortcuts import render
 from django.urls import include, path
@@ -28,4 +30,10 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("", home, name="home"),
     path("", include("accounts.urls")),
+    # 追加项不排在既有 path("", ...) 之前，避免抢占既有路由。
+    path("listings/", include("listings.urls")),
 ]
+
+# 开发期媒体服务（闭合 deferred-work.md 中登记的待办）。
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
