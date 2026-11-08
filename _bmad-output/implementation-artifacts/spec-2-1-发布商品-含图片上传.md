@@ -97,6 +97,32 @@ context:
 - Given 1.1–1.5 的既有用例，When 运行完整测试套件，Then 62 个既有用例仍全部通过。
 - Given 迁移已生成，When 运行 `makemigrations --check --dry-run`，Then 无新增变更。
 
+### Review Findings
+
+> 2026-11-08 独立代码审查（`/bmad-code-review`），范围 `6454e04..bedd5f1`，模式 `full`；生效审查层：Edge Case Hunter + Acceptance Auditor（团队精简配置 `_bmad/custom/bmad-code-review.toml` 禁用 Blind Hunter / Verification Gap）。9 条原始发现（EC 5 / AA 4）→ 1 组 decision-needed（合并 EC-2 + AA-2，已由人类裁决转 rejected）、7 条直接 rejected，最终 9 条全部驳回；0 patch、0 defer、无代码改动。分诊期间实测：重复合法 POST 后 `Product.objects.count() == 2`；未登录 PUT/GET 均 302；Pillow 对声明 20000×20000 的 PNG 在 `Image.open()` 阶段抛 `DecompressionBombError` 并被 `validate_images` 兜成中文表单错误。
+
+**Decision Needed（已裁决）**
+
+- [x] [Review][Decision] 冻结区 Always「不产生重复提交的第二条记录」与 Decision ③「提交成功后留在发布页显示成功态、不跳转」在无幂等机制时相互冲突，实现实测可重复建单 — [listings/views.py:21-39; 冻结区 Always / Decision ③] `publish_view` 每次成功 POST 都构造无 `instance` 的 `ProductForm(request.POST)` 并 `form.save(commit=False)` → 新建记录，整个视图无 session nonce / 一次性 token / 去重键 / PRG；实测同一已认证 Client 连续两次合法 POST 均返回 200 且 `Product.objects.count() == 2`，直接违反冻结区 Always 的明文约束，且本故事无删除路径（2.4/5.1 未实现），重复 `pending` 数据无法清理。常规 PRG 修复被 Decision ③ 明确排除；要同时满足两条约束只能引入幂等机制（session 一次性 token + 表单隐藏字段、或 DB 唯一键），方案不唯一且需决定 token 失效时机与成功态刷新的语义，属人类意图选择，代码无法无歧义地自行修补。build 阶段三层审查曾以 EC-2 / BH-9 记为「低危已知取舍」（见 `## Review Triage Log`）；本次独立审查依据冻结区明文约束与可复现证据升级为 decision-needed。**人类裁决（2026-11-08，选项 1「接受已知代价」）**：维持现状、不改代码，与 build 阶段裁决一致，该组转 rejected；遗留风险保留在本规格与 `Review Triage Log` 中，待 2.4 / 5.1 提供管理界面后处理。
+
+**Patch**
+
+_无。_
+
+**Defer**
+
+_无。_
+
+**Rejected**
+
+- `low` → rejected — EC-1「事务中第二张图片保存异常 → 首张图片残留孤儿文件且异常裸奔 500」：`listings/views.py:32-38` 确实没有事务外文件清理与异常兜底，但触发依赖磁盘写满 / DB 锁 / 存储错误等外部故障，日常演示不可达；1–5 张图片在进入 `transaction.atomic()` 前已全部通过 Pillow 格式/大小/张数校验，保存阶段无已证明的异常路径。修复需新增 try/except、记录本轮已写路径、异常时删文件并回显表单错误，属新增分支与状态而非直接修正。与 build 阶段 EC-1 同根因。
+- `false` → rejected — EC-3「≤5MB 但声明超大像素的 JPEG/PNG 令 `verify()` 分配巨量内存 → OOM / 500」：实测 Pillow 13.0.0 `MAX_IMAGE_PIXELS = 89478485`，声明 20000×20000（4 亿像素）的 PNG 在 `Image.open()` 阶段即抛 `DecompressionBombError`，被 `listings/forms.py:36` 的 `except Exception` 兜成「图片文件损坏或格式不支持，仅支持 JPEG/PNG」中文表单错误；1x–2x 阈值区间只发 `DecompressionBombWarning`，且 `verify()` 仅校验文件结构、不解码像素，不会分配巨量内存；本故事也不存在任何图片解码路径。
+- `false` → rejected — EC-4「`files=None` / 含非 UploadedFile 元素 / `seek(0)` 抛异常会冒泡 500」：`validate_images` 在交付程序中的唯一调用点是 `listings/views.py:25-26`，传入 `request.FILES.getlist('images')`；Django `MultiValueDict.getlist()` 恒返回 `list`（无键时 `[]`），元素恒为支持 `seek()` 的 `UploadedFile`，三类声明输入在交付程序中均不可达。
+- `low` → rejected — EC-5「admin 裸注册 `ProductImage` 可绕过 1–5 张 / 格式 / 5MB 约束」：`listings/admin.py:5-6` 确为裸注册，管理员可在后台新增第 6 张或任意格式图片，`ProductImage` 模型亦无 `save()` 校验。但冻结区限定 admin「仅注册模型供人工验收查看 pending 数据」，审核界面属 5.1，演示环境管理员即演示者本人；修复需新增 ModelAdmin / 模型层校验并复用 `validate_images`，属新增复杂度且用户日常不会遇到。与 build 阶段 BH-6 同根因。
+- `false` → rejected — AA-1「冻结 I/O 矩阵要求 PUT/PATCH/DELETE 一律 405，但未登录实测 302，且缺未登录场景回归」：实测未登录 PUT = 302、GET = 302；`@login_required` 置于外层是冻结区 Code Map / Design Notes 与 `listings/views.py:10-13` 明文要求的安全行为（未登录优先重定向并带 `next`），不是坏结果；矩阵该行省略「已登录」前提属规格表述，修复=编辑被审查的 spec，按 triage 规则 reject。`test_unsafe_methods_return_405` 覆盖已登录情形，与预期一致。
+- `low` → rejected — AA-3「spec frontmatter `status: done` 与 Implementation Notes「已置 `in-review`」及 sprint `review` 三口径不一致」：差异真实（build 收尾与审查阶段在不同时间点写入，Notes 的「状态更正」记述未与最终 frontmatter 对齐），但修复=编辑被审查工件；本次 `/bmad-code-review` 收尾会按 Step 4 同步 spec 与 sprint 状态为 `done`。按 triage 规则 reject，与 1.5 审查同项裁决一致。
+- `false` → rejected — AA-4「`epic-2-context.md` 要求「Pillow 校验 JPEG/PNG 并缩略」，实现未生成缩略图」：`epic-2-context.md` 是 epic 级编译上下文（明确不含 story-level details），冻结区 `Never` 与 Design Notes 把列表/详情展示层明确留给 2.5/2.8；本故事无任何对外图片展示路径，`ProductImage` 缺缩略图字段不产生可观测坏结果。AA 层自身亦声明「不计为代码缺陷」，与 build 阶段 BH-4 裁决一致。
+
 ## Implementation Notes
 
 - 实现按冻结规格完成；改动共 12 个文件：`listings/models.py`、`listings/forms.py`、`listings/views.py`、`listings/urls.py`、`listings/admin.py`、`listings/tests.py`、`listings/migrations/0001_initial.py`（新建）、`templates/listings/publish.html`（新建）、`templates/base.html`、`config/urls.py`、本规格、`sprint-status.yaml`。未改动 `accounts` 五个视图/路由、`User` 字段、`config/settings.py`、`accounts` 既有迁移、既有 62 个用例；`db.sqlite3`/`media/` 为 gitignore 的运行时内容，`migrate` 仅新增 listings 两张表。
@@ -110,6 +136,7 @@ context:
 - 2026-11-08 三层审查补丁：仅改 `listings/tests.py`，新增 6 个用例（DEBUG 媒体路由 GET 200 + 字节一致、合法 PNG、真实 JPEG 伪装 .png 扩展名仍被接受、12 组合法分类×成色 subTest、已登录导航发布入口、4 组表单边界中文文案 subTest），补 `importlib` / `config.urls` / `clear_url_caches` 导入；媒体路由用例在 `finally` 中还原 `urlpatterns` 与 URL 缓存，避免污染同进程用例。4 组变异检查（删 static() / 删导航链接 / 允许格式缩为只 JPEG / 中文文案改英文）均使对应用例失败，临时改动已按字节还原。
 - 补丁后完整复验（主代理执行）：`manage.py check` 无问题；`makemigrations --check --dry-run` → `No changes detected`；`manage.py migrate` → `No migrations to apply`（迁移已在补丁前应用）；`manage.py test -v 2` → **90 tests OK**（62 既有 + 28 `PublishViewTests`），无失败/跳过，6 个新增用例逐个 ok。
 - 状态更正：上面的 `status: done` 是实现收尾时记述；Step 4 审查开始后本规格 frontmatter 已置 `status: 'in-review'`，最终状态由 Step 5 收尾同步。`listings/tests.py` 的 84/22 记述为补丁前口径，以本条 90/28 为准。
+- 2026-11-08 `/bmad-code-review` 独立审查收尾（范围 `6454e04..bedd5f1`、`full` 模式）：9 条发现全部驳回（唯一一组 decision-needed 由人类裁决「接受已知代价」转 rejected），0 patch、0 defer、无代码改动。**本规格 frontmatter `status: done` 为最终状态**——上一条「Step 4 审查开始后已置 `in-review`」是 build 阶段中间记述，最终未落到文件，以本条为准；`sprint-status.yaml` 的 `2-1` 由 `review` → `done`。收尾复验：`.venv/Scripts/python.exe manage.py test` → 90 tests OK、`manage.py check` → 无问题、`makemigrations --check --dry-run` → No changes detected。遗留已知代价：刷新或重放成功 POST 会多建一条 `pending` 商品（冻结区 Decision ③ 禁止跳转，PRG 与幂等机制均未引入），待 2.4 / 5.1 具备管理界面后处理。
 
 ## Spec Change Log
 
