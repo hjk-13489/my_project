@@ -1,10 +1,10 @@
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_http_methods
 
 from .forms import ProductForm, validate_images
-from .models import ProductImage
+from .models import Product, ProductImage, RejectionNotice
 
 
 # @login_required 置于外层：未登录访客优先 302 到登录页（带 next）。
@@ -41,3 +41,58 @@ def publish_view(request):
         form = ProductForm()
 
     return render(request, 'listings/publish.html', {'form': form})
+
+
+# 与 publish_view 同样的双门控：@login_required 外层（未登录 302 带 next），
+# 内层显式放行 GET/HEAD/POST；重提写入同样要求登录 + is_verified。
+@login_required
+@require_http_methods(['GET', 'HEAD', 'POST'])
+def resubmit_view(request, pk):
+    """修改并重新提交被驳回的商品：作用于本人 rejected 商品，状态经模型层回到 pending。"""
+
+    # 已登录但未认证：统一 200 提示页，且不做商品查询，避免泄露商品存在性。
+    if not request.user.is_verified:
+        return render(request, 'listings/resubmit.html', {'needs_verification': True})
+
+    # 越权 / 不存在 / 非驳回态统一 404，不泄露商品是否存在；用基础查询集，
+    # 不经过 visible()，否则查不到被驳回商品。
+    product = get_object_or_404(Product, pk=pk, owner=request.user, status='rejected')
+    latest_notice = RejectionNotice.objects.filter(
+        product=product, owner=request.user
+    ).order_by('-created_at').first()
+
+    if request.method == 'POST':
+        form = ProductForm(request.POST, instance=product)
+        # 先触发表单校验以建立 form._errors，图片错误才能用 add_error 汇入同一错误区。
+        form_valid = form.is_valid()
+        images = request.FILES.getlist('images')
+        # 重提时图片为可选：不传则保留原图，传了才按 validate_images 校验；
+        # 但 0 图商品不传图会退化成无图商品，禁止回到 pending。
+        image_errors = validate_images(images) if images else []
+        if not images and product.images.count() == 0:
+            image_errors.append('该商品暂无图片，请至少上传 1 张商品图片')
+        for message in image_errors:
+            form.add_error(None, message)
+
+        if form_valid and not image_errors:
+            # 五字段更新、可选图片替换与状态流转同成同败；ProductForm 不含 status，
+            # 状态请求传值一律忽略，只由模型层 resubmit() 写回 pending。
+            with transaction.atomic():
+                form.save(commit=False).save()
+                if images:
+                    product.images.all().delete()
+                    for image_file in images:
+                        ProductImage.objects.create(product=product, image=image_file)
+                product.resubmit()
+            return render(request, 'listings/resubmit.html', {
+                'submitted': True, 'product': product,
+            })
+    else:
+        form = ProductForm(instance=product)
+
+    return render(request, 'listings/resubmit.html', {
+        'form': form,
+        'product': product,
+        'reason': latest_notice.reason if latest_notice else '',
+        'image_count': product.images.count(),
+    })

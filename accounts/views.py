@@ -6,6 +6,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST, require_safe
 from .forms import LoginForm, RegisterForm, VerificationForm
 from .models import VerificationRequest
+from listings.models import RejectionNotice
 
 
 def register(request):
@@ -122,15 +123,23 @@ def verify_view(request):
 @login_required
 @require_safe
 def profile_view(request):
-    """个人中心：只读展示本人账号信息、认证申请历史，四个业务板块以中文空状态占位。"""
+    """个人中心：只读展示本人账号信息、认证申请历史与本人驳回通知，其余板块空状态占位。"""
     profile_user = request.user
+    # 「我的消息」按 owner=request.user 服务端过滤，仅本人可见；通知实体不随
+    # 商品状态变化而删除，故重提后历史驳回理由仍可在此看到。
+    my_messages = list(
+        RejectionNotice.objects.filter(owner=profile_user)
+        .select_related('product')
+        .order_by('-created_at')
+    )
     return render(request, 'accounts/profile.html', {
         'profile_user': profile_user,
         'verification_requests': profile_user.verification_requests.all(),
-        # 方案 A「壳 + 空状态」：四板块暂无业务数据，统一空状态；Epic 2/3/4
-        # 接入真实数据时，以 filter(owner=profile_user) / filter(buyer=profile_user) 替换。
+        # 方案 A「壳 + 空状态」：其余三板块暂无业务数据，统一空状态；Epic 3/4
+        # 接入真实数据时，以 filter(buyer=profile_user) / filter(owner=profile_user) 替换。
         'my_listings_empty': True,
         'my_orders_empty': True,
-        'my_messages_empty': True,
+        'my_messages': my_messages,
+        'my_messages_empty': not my_messages,
         'my_reviews_empty': True,
     })

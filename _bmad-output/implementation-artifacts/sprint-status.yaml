@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-05-2026 16:56
-last_updated: 11-08-2026 15:45
+last_updated: 11-09-2026 11:24
 project: my_project
 project_key: NOKEY
 tracking_system: file-system
@@ -47,7 +47,7 @@ development_status:
   epic-2: in-progress
   2-1-发布商品-含图片上传: done
   2-2-商品状态流转-待审核-上架-驳回: done
-  2-3-驳回通知与重新提交: backlog
+  2-3-驳回通知与重新提交: review
   2-4-查看我的发布: backlog
   2-5-商品列表浏览-仅上架: backlog
   2-6-关键词搜索: backlog

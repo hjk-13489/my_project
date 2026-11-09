@@ -87,7 +87,23 @@
                 {% if my_messages_empty %}
                     <p class="text-muted mb-0">暂无消息记录，你还没有任何消息</p>
                 {% else %}
-                    {# 后续 Epic 3 以 filter(owner=profile_user) 替换空状态 #}
+                    <ul class="list-group list-group-flush">
+                        {% for notice in my_messages %}
+                            <li class="list-group-item">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <strong>{{ notice.product.title }}</strong>
+                                    <span class="badge bg-secondary">{{ notice.product.get_status_display }}</span>
+                                </div>
+                                <p class="mb-1">驳回理由：{{ notice.reason|default:'无' }}</p>
+                                <small class="text-muted">{{ notice.created_at|date:'Y-m-d H:i' }}</small>
+                                {% if notice.can_resubmit %}
+                                    <div class="mt-2">
+                                        <a href="{% url 'resubmit' notice.product.pk %}" class="btn btn-sm btn-outline-primary">修改并重新提交</a>
+                                    </div>
+                                {% endif %}
+                            </li>
+                        {% endfor %}
+                    </ul>
                 {% endif %}
             </div>
         </div>

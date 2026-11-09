@@ -1,5 +1,5 @@
 from django.conf import settings
-from django.db import models
+from django.db import models, transaction
 
 
 class InvalidTransition(Exception):
@@ -34,12 +34,12 @@ class Product(models.Model):
         ('rejected', '已驳回'),
         ('offline', '已下架'),
     ]
-    # 状态流转唯一定义：仅 pending 可流转到 approved / rejected；
-    # approved → offline（5.2）、rejected → pending（2.3）留给后续故事。
+    # 状态流转唯一定义：pending 可流转到 approved / rejected（2.2），
+    # rejected 可重新提交回 pending（2.3）；approved → offline（5.2）留给后续故事。
     ALLOWED_TRANSITIONS = {
         'pending': ('approved', 'rejected'),
         'approved': (),
-        'rejected': (),
+        'rejected': ('pending',),
         'offline': (),
     }
 
@@ -76,9 +76,23 @@ class Product(models.Model):
         """审核通过：pending → approved。"""
         self._transition('approved')
 
-    def reject(self):
-        """审核驳回：pending → rejected。"""
-        self._transition('rejected')
+    def reject(self, reason=''):
+        """审核驳回：pending → rejected，并在同一事务内生成驳回通知。
+
+        reason 为驳回理由。先经 _transition() 校验，校验通过后状态写入与
+        通知生成处于同一事务；非法转移不会留下通知，也不会改动状态。
+        """
+        with transaction.atomic():
+            self._transition('rejected')
+            RejectionNotice.objects.create(
+                owner=self.owner,
+                product=self,
+                reason=reason,
+            )
+
+    def resubmit(self):
+        """重新提交：rejected → pending（2.3），委托模型层唯一流转入口。"""
+        self._transition('pending')
 
     def _transition(self, target):
         """执行合法转移并持久化；非法转移抛 InvalidTransition，不改动状态、不落库。"""
@@ -111,3 +125,38 @@ class ProductImage(models.Model):
 
     def __str__(self):
         return f'{self.product.title} - {self.image.name}'
+
+
+class RejectionNotice(models.Model):
+    """驳回通知：reject() 在合法流转时原子生成，仅本人可见，重提后仍保留。
+
+    落在 listings 内、不跨 app import；后续 5.2 下架通知与 FR-27 裁决通知可复用本实体。
+    """
+
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='rejection_notices',
+        verbose_name='接收人',
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='notices',
+        verbose_name='商品',
+    )
+    reason = models.TextField(blank=True, verbose_name='驳回理由')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='通知时间')
+
+    class Meta:
+        verbose_name = '驳回通知'
+        verbose_name_plural = '驳回通知'
+        ordering = ('-created_at',)
+
+    def __str__(self):
+        return f'{self.product.title} - 驳回通知'
+
+    @property
+    def can_resubmit(self):
+        """关联商品当前仍为已驳回态时，才提供重新提交入口。"""
+        return self.product.status == 'rejected'

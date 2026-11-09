@@ -522,3 +522,358 @@ class ProductVisibilityTests(TestCase):
         product = Product.objects.get()
         self.assertEqual(product.status, 'pending')
         self.assertEqual(Product.objects.visible().filter(id=product.id).count(), 0)
+
+
+# ---------------------------------------------------------------------------
+# Story 2.3：驳回通知与重新提交。本段自包含追加，不改动上方既有测试类。
+# ---------------------------------------------------------------------------
+import tempfile
+from decimal import Decimal
+from io import BytesIO
+
+from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
+from django.urls import reverse
+from PIL import Image as PILImage
+
+from .models import InvalidTransition, Product, ProductImage, RejectionNotice
+
+_STORY23_MEDIA_ROOT = tempfile.mkdtemp(prefix='story23-media-')
+
+
+def _story23_image(name='pic.png', fmt='PNG'):
+    """生成一张 Pillow 可 verify() 的真实 JPEG/PNG 内存图片。"""
+    buf = BytesIO()
+    PILImage.new('RGB', (8, 8)).save(buf, format=fmt)
+    content_type = 'image/jpeg' if fmt == 'JPEG' else 'image/png'
+    return SimpleUploadedFile(name, buf.getvalue(), content_type=content_type)
+
+
+@override_settings(MEDIA_ROOT=_STORY23_MEDIA_ROOT)
+class RejectionNoticeAndResubmitTests(TestCase):
+    """覆盖 spec-2-3 I/O 矩阵：通知可见性/越权/持久化、重提各分支、非法路径、再审核。"""
+
+    def setUp(self):
+        self.User = get_user_model()
+        self.owner = self.User.objects.create_user(
+            student_id='20232301', username='卖家甲', password='testpass12345'
+        )
+        self.other = self.User.objects.create_user(
+            student_id='20232302', username='卖家乙', password='testpass12345'
+        )
+        for user in (self.owner, self.other):
+            user.is_verified = True
+            user.save(update_fields=['is_verified'])
+        self.valid_data = {
+            'title': '重新提交后的标题',
+            'description': '重新提交后的描述',
+            'price': '30.00',
+            'condition': '良好',
+            'category': '教材',
+        }
+
+    def _make_product(self, owner=None, status='pending'):
+        return Product.objects.create(
+            owner=owner or self.owner,
+            title='原商品标题',
+            description='原商品描述',
+            price=Decimal('25.00'),
+            condition='中等',
+            category='教材',
+            status=status,
+        )
+
+    def _reject_with_reason(self, product, reason='图片不清晰，请重新上传'):
+        product.reject(reason)
+        return product
+
+    def _attach_images(self, product, count=2, prefix='old'):
+        for i in range(count):
+            ProductImage.objects.create(
+                product=product, image=_story23_image(f'{prefix}_{i}.png')
+            )
+
+    def _login(self, user=None):
+        self.client.force_login(user or self.owner)
+
+    # ---- 通知可见性与越权隔离 ----
+    def test_notice_visible_only_to_owner(self):
+        product = self._make_product()
+        self._reject_with_reason(product, '独家理由-甲-12345')
+        self._login()
+        resp = self.client.get(reverse('profile'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '原商品标题')
+        self.assertContains(resp, '独家理由-甲-12345')
+        self.assertContains(resp, '已驳回')
+
+        self.client.force_login(self.other)
+        resp_other = self.client.get(reverse('profile'))
+        self.assertNotContains(resp_other, '原商品标题')
+        self.assertNotContains(resp_other, '独家理由-甲-12345')
+        self.assertContains(resp_other, '暂无消息记录，你还没有任何消息')
+
+    def test_reject_creates_owner_scoped_notice(self):
+        product = self._make_product()
+        product.reject('第一次驳回理由')
+        notice = RejectionNotice.objects.get(product=product)
+        self.assertEqual(notice.owner_id, self.owner.pk)
+        self.assertEqual(notice.reason, '第一次驳回理由')
+        self.assertEqual(RejectionNotice.objects.filter(owner=self.other).count(), 0)
+
+    def test_messages_empty_state(self):
+        self._login()
+        resp = self.client.get(reverse('profile'))
+        self.assertTrue(resp.context['my_messages_empty'])
+        self.assertContains(resp, '暂无消息记录，你还没有任何消息')
+
+    def test_cross_user_resubmit_returns_404(self):
+        product = self._make_product()
+        self._reject_with_reason(product, '甲的理由-不可见')
+        self.client.force_login(self.other)
+        url = reverse('resubmit', args=[product.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.client.post(url, self.valid_data).status_code, 404)
+        self.assertNotContains(self.client.get(reverse('profile')), '甲的理由-不可见')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+        self.assertEqual(product.title, '原商品标题')
+
+    def test_login_required_for_messages_and_resubmit(self):
+        product = self._make_product()
+        self._reject_with_reason(product)
+        for url in (reverse('profile'), reverse('resubmit', args=[product.pk])):
+            with self.subTest(url=url):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 302)
+                self.assertIn('/login/', resp['Location'])
+                self.assertIn('next=', resp['Location'])
+
+    def test_unverified_user_gets_prompt_page(self):
+        product = self._make_product()
+        self._reject_with_reason(product)
+        self.owner.is_verified = False
+        self.owner.save(update_fields=['is_verified'])
+        self._login()
+        resp = self.client.get(reverse('resubmit', args=[product.pk]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '需先完成学号认证')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+
+    # ---- 重提成功与持久化 ----
+    def test_resubmit_get_shows_reason_and_original_images(self):
+        product = self._make_product()
+        self._attach_images(product, count=2)
+        self._reject_with_reason(product, '页面上应显示的驳回理由')
+        self._login()
+        resp = self.client.get(reverse('resubmit', args=[product.pk]))
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '页面上应显示的驳回理由')
+        self.assertContains(resp, '原商品标题')
+        self.assertContains(resp, '2 张图片')
+
+    def test_resubmit_without_images_keeps_originals_and_updates_fields(self):
+        product = self._make_product()
+        self._attach_images(product, count=2)
+        self._reject_with_reason(product)
+        original_pk = product.pk
+        original_owner_id = product.owner_id
+        original_created_at = product.created_at
+        self._login()
+        resp = self.client.post(reverse('resubmit', args=[product.pk]), self.valid_data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '已重新提交')
+        product.refresh_from_db()
+        self.assertEqual(product.pk, original_pk)
+        self.assertEqual(product.owner_id, original_owner_id)
+        self.assertEqual(product.created_at, original_created_at)
+        self.assertEqual(product.title, '重新提交后的标题')
+        self.assertEqual(product.description, '重新提交后的描述')
+        self.assertEqual(product.price, Decimal('30.00'))
+        self.assertEqual(product.condition, '良好')
+        self.assertEqual(product.category, '教材')
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(product.images.count(), 2)
+        self.assertEqual(Product.objects.visible().filter(pk=product.pk).count(), 0)
+
+    def test_resubmit_with_images_replaces_in_one_transaction(self):
+        product = self._make_product()
+        self._attach_images(product, count=3, prefix='seed')
+        self._reject_with_reason(product)
+        old_names = list(product.images.values_list('image', flat=True))
+        self._login()
+        new_images = [_story23_image(f'fresh_{i}.png') for i in range(2)]
+        resp = self.client.post(
+            reverse('resubmit', args=[product.pk]),
+            dict(self.valid_data, images=new_images),
+        )
+        self.assertEqual(resp.status_code, 200)
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(product.title, '重新提交后的标题')
+        self.assertEqual(product.images.count(), 2)
+        new_names = list(product.images.values_list('image', flat=True))
+        self.assertEqual(len(new_names), 2)
+        self.assertFalse(set(new_names) & set(old_names))
+
+    def test_status_cannot_be_set_by_request(self):
+        product = self._make_product()
+        self._attach_images(product, count=1, prefix='nostatus')
+        self._reject_with_reason(product)
+        self._login()
+        resp = self.client.post(
+            reverse('resubmit', args=[product.pk]),
+            dict(self.valid_data, status='approved'),
+        )
+        self.assertEqual(resp.status_code, 200)
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(Product.objects.visible().filter(pk=product.pk).count(), 0)
+
+    def test_reason_persists_after_resubmit(self):
+        product = self._make_product()
+        self._attach_images(product, count=1, prefix='persist')
+        self._reject_with_reason(product, '重提后仍应可见的理由')
+        self._login()
+        self.client.post(reverse('resubmit', args=[product.pk]), self.valid_data)
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(RejectionNotice.objects.filter(product=product).count(), 1)
+        resp = self.client.get(reverse('profile'))
+        self.assertContains(resp, '重提后仍应可见的理由')
+        self.assertContains(resp, '待审核')
+
+    # ---- 校验失败不落库 ----
+    def test_form_validation_failure_writes_nothing(self):
+        product = self._make_product()
+        self._attach_images(product, count=1, prefix='keep')
+        self._reject_with_reason(product)
+        notices_before = RejectionNotice.objects.count()
+        self._login()
+        resp = self.client.post(
+            reverse('resubmit', args=[product.pk]), dict(self.valid_data, price='0')
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '价格必须大于 0')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+        self.assertEqual(product.title, '原商品标题')
+        self.assertEqual(product.images.count(), 1)
+        self.assertEqual(RejectionNotice.objects.count(), notices_before)
+
+    def test_image_validation_failure_writes_nothing(self):
+        product = self._make_product()
+        self._attach_images(product, count=2, prefix='keep')
+        self._reject_with_reason(product)
+        self._login()
+        broken = SimpleUploadedFile('fake.gif', b'not a real image', content_type='image/gif')
+        resp = self.client.post(
+            reverse('resubmit', args=[product.pk]), dict(self.valid_data, images=[broken])
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '图片文件损坏或格式不支持，仅支持 JPEG/PNG')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+        self.assertEqual(product.title, '原商品标题')
+        self.assertEqual(product.images.count(), 2)
+
+    # ---- 非法路径 ----
+    def test_non_rejected_states_return_404(self):
+        self._login()
+        for status in ('pending', 'approved', 'offline'):
+            with self.subTest(status=status):
+                product = self._make_product(status=status)
+                url = reverse('resubmit', args=[product.pk])
+                self.assertEqual(self.client.get(url).status_code, 404)
+                self.assertEqual(self.client.post(url, self.valid_data).status_code, 404)
+                product.refresh_from_db()
+                self.assertEqual(product.status, status)
+                self.assertEqual(product.title, '原商品标题')
+
+    def test_illegal_resubmit_raises_and_creates_no_notice(self):
+        product = self._make_product(status='approved')
+        before = RejectionNotice.objects.count()
+        with self.assertRaises(InvalidTransition):
+            product.resubmit()
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'approved')
+        self.assertEqual(RejectionNotice.objects.count(), before)
+
+    def test_illegal_reject_creates_no_notice(self):
+        product = self._make_product(status='approved')
+        before = RejectionNotice.objects.count()
+        with self.assertRaises(InvalidTransition):
+            product.reject('不该留下的理由')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'approved')
+        self.assertEqual(RejectionNotice.objects.count(), before)
+
+    # ---- 重提后再审核 ----
+    def test_resubmit_then_approve_matches_story_22(self):
+        product = self._make_product()
+        product.reject('理由')
+        product.resubmit()
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        self.assertEqual(Product.objects.visible().filter(pk=product.pk).count(), 0)
+        product.approve()
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'approved')
+        self.assertEqual(Product.objects.visible().filter(pk=product.pk).count(), 1)
+
+    def test_resubmit_then_reject_creates_new_notice(self):
+        product = self._make_product()
+        product.reject('第一次理由')
+        product.resubmit()
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        product.reject('第二次理由')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+        reasons = list(
+            RejectionNotice.objects.filter(product=product).values_list('reason', flat=True)
+        )
+        self.assertEqual(len(reasons), 2)
+        self.assertEqual(set(reasons), {'第一次理由', '第二次理由'})
+
+    # ---- 界面重提入口与 0 图守卫 ----
+    def test_profile_resubmit_entry_shown_when_rejected(self):
+        product = self._make_product()
+        self._reject_with_reason(product)
+        notice = RejectionNotice.objects.get(product=product)
+        self.assertTrue(notice.can_resubmit)
+        self._login()
+        resp = self.client.get(reverse('profile'))
+        self.assertContains(resp, '修改并重新提交')
+        self.assertContains(resp, f'href="/listings/{product.pk}/resubmit/"')
+
+    def test_profile_resubmit_entry_hidden_after_resubmit(self):
+        product = self._make_product()
+        self._attach_images(product, count=1, prefix='entry')
+        self._reject_with_reason(product)
+        self._login()
+        self.client.post(reverse('resubmit', args=[product.pk]), self.valid_data)
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'pending')
+        notice = RejectionNotice.objects.get(product=product)
+        self.assertFalse(notice.can_resubmit)
+        resp = self.client.get(reverse('profile'))
+        self.assertNotContains(resp, '修改并重新提交')
+        self.assertNotContains(resp, f'/listings/{product.pk}/resubmit/')
+
+    def test_zero_image_rejected_product_cannot_resubmit_without_images(self):
+        product = self._make_product()
+        self._reject_with_reason(product)
+        notices_before = RejectionNotice.objects.count()
+        self._login()
+        resp = self.client.post(reverse('resubmit', args=[product.pk]), self.valid_data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '该商品暂无图片，请至少上传 1 张商品图片')
+        self.assertNotContains(resp, '已重新提交')
+        product.refresh_from_db()
+        self.assertEqual(product.status, 'rejected')
+        self.assertEqual(product.title, '原商品标题')
+        self.assertEqual(product.images.count(), 0)
+        self.assertEqual(RejectionNotice.objects.count(), notices_before)
