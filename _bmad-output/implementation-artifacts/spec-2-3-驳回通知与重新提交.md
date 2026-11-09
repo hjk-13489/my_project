@@ -177,3 +177,16 @@ context:
 - `.venv/Scripts/python.exe manage.py migrate` — expected: `0002` 正常应用，本地 `db.sqlite3` schema 更新（依冻结决策 ④ 允许执行，文件已 gitignore）
 - `.venv/Scripts/python.exe manage.py test -v 2` — expected: 既有 102 用例 + 本故事新增用例全绿，无失败 / 跳过
 - `git diff --name-status`、`git diff -- listings/models.py` 与 `git diff -- listings/admin.py` — expected: 交付文件与 AC-5 范围一致，`visible()` 与 `0001_initial.py` 未变，`admin.py` diff 为空
+
+### Review Findings
+
+> 独立代码审查（2026-11-09，`bmad-code-review`，`review_mode=full`，基线 `da46035..HEAD`，diff 12 文件 / +900 −16 / 1064 行）。激活层：Edge Case Hunter、Acceptance Auditor；Blind Hunter 与 Verification Gap 由团队配置置空跳过，`failed_layers` 为空。共 7 条原始发现，逐条核验后 **0 `decision-needed` / 0 `patch` / 0 `defer` / 7 rejected → Clean review**。主代理独立复跑：`.venv/Scripts/python.exe manage.py test -v 1` → 123 tests OK，`check` → 0 issues。
+
+**Rejected**
+- `low` → rejected — 【EC-1 并发状态覆盖】`resubmit_view` 无 `select_for_update()`，`_transition()` 只读内存 `self.status`，并发审核确可覆盖写入；但冻结决策 ① 下 `approve()` / `reject()` 无生产调用者、无审核界面，日常路径不可达，修复需 DB 端锁或条件更新（新增复杂度），且 spec-2-2 BH-7 / 本规格 EC-2、EC-5 已裁决留待 5.1 引入真实调用者时补。
+- `low` → rejected — 【EC-2 `reject(None)` 内存状态脏】`reason` 为 `TextField(blank=True)`（DB 层 NOT NULL），显式传 `None` 会 `IntegrityError` 回滚 DB 但内存 `status='rejected'` 残留；默认值为 `''` 且无生产调用者，需显式传 `None` 才触发，修复需 `or ''` 或异常路径 `refresh_from_db()` 新分支，与 2.2 EC-1 / 本规格 EC-6 同类裁决。
+- `false` — 【EC-3 无通知的驳回商品重提】`RejectionNotice` 唯一创建点是 `reject()`（`listings/models.py:85-91`），无通知即无理由数据；`resubmit_view` 渲染「暂无驳回理由」、`profile_view` 渲染空状态是正确行为，不存在「有理由却未展示」的路径；提议的 `raise Http404` 反会切断冻结决策 ① 下唯一的界面重提入口。
+- `false` — 【EC-4 存量 >5 张图未重校验】冻结 Q3=A「不传则保留原图」是既定语义，`MAX_IMAGES=5` 是 `validate_images()` 对上传动作的校验规则而非存量数据不变式（本规格 BH-7 已裁决）；>5 图只能由绕过模型层的 admin 手工操作产生，提议守卫与「保留原图」冲突。
+- `low` → rejected — 【EC-5 刷新重发 POST 命中 404】成功态沿用 2.1 D-011 的 200 成功页，刷新重发因 `status='rejected'` 过滤不再匹配而 404；不产生重复写入或状态损坏，成功页已给出「查看我的消息 / 继续发布商品」出口，改 PRG 需改变冻结成功态体验（新增设计，非直接修正），本规格 EC-1 已裁决。
+- `low` → rejected — 【AA-1 0 图守卫与冻结区文字不一致】守卫（`listings/views.py:72-73`）与 `test_zero_image_rejected_product_cannot_resubmit_without_images` 确让 0 图商品不传图时保持 `rejected`，冻结区「图片为可选」/ AC-2 未同步 0 图例外；但 0 图本身违反 `epic-2-context.md:24` 的「每商品 ≥1 张图片」不变式，该守卫由人类决策 D-040 明确批准；消除文字歧义的唯一修复是编辑本规格冻结区，按 triage 规则一律驳回（如需修订应由人类重新协商，不属代码 patch）。
+- `false` — 【AA-2 视图内 `status` 字面量】`get_object_or_404(..., status='rejected')`（`listings/views.py:59`）是 ORM 查询过滤条件，`can_resubmit`（`listings/models.py:160-162`）是只读属性，二者均无状态赋值，状态写入仍唯一经由 `_transition()`；规格 Code Map L93 / Implementation Notes L111 明文要求该查询过滤，Design Notes 亦把 Never 解释为禁止 `product.status = 'pending'` 式赋值；措辞歧义的修复=编辑本规格，同样驳回。
