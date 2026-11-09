@@ -427,3 +427,36 @@
     *   依据 2：17 条发现中 12 条为 `false`（多数修复=编辑被审查规格，或已被现有用例覆盖）、5 条为 `low → rejected`（并发/未保存实例等路径在交付程序中不可达，且修复需新增守卫而非直接修正）；全仓 grep 证实 `approve()`/`reject()` 除测试外无调用者。
 *   **结果**：spec `status: done`，`sprint-status.yaml` 的 `2-2` → `review`；实现提交只含 4 个故事文件。审查日志逐条写入 spec 的 `Review Triage Log`，`review_loop_iteration` 保持 0。
 *   **事后验证**：`manage.py check` 无问题、`makemigrations --check --dry-run` → No changes detected、`test -v 2` → **102 tests OK**（90 既有 + 12 新增），无失败/跳过。**遗留风险**：5.1 引入真实审核调用者后需补 DB 端并发校验；sprint 的 `done` 待独立代码审查收尾写入。
+
+---
+## D-038: Story 2.3 四项意图缺口全部选 A，保留完整规格
+
+*   **触发阶段**：`/bmad-build` Step 2（CHECKPOINT 1 前的门槛：规格体量 + Open Questions Q1–Q4）
+*   **智能体的建议**：Q1 驳回理由产生端（A 只做消费端 / B admin 加驳回 action / C 演示驳回页）；Q2「我的消息」载体（A 独立通知实体 / B Product 派生 / C 独立页面）；Q3 重提编辑范围与图片（A 五字段 + 图片可选 / B 图片必传 / C 一键重提）；Q4 迁移与运行时数据（A 允许 0002 + migrate / B 只生成不执行 / C 禁止 schema 变更）；体量（保留完整规格 / 拆分）。逐项推荐 A 与「保留完整规格」。
+*   **我们的判断与依据**：**采纳（Q1=A、Q2=A、Q3=A、Q4=A、保留完整规格）**。
+    *   依据 1：Q1=A 严守 `epic-2-context.md:53`「审核动作由 Epic 5 触发，本史诗只消费由此产生的 status」，不提前实现 5.1，也不放宽 2.2 决策 ③ 的 admin 裸注册；接受「演示中无法从界面造出驳回数据」这一代价，等价路径由测试用例在内存测试库覆盖。
+    *   依据 2：Q2=A 让重提后的历史驳回理由仍保留，并为 5.2 下架通知、FR-27 裁决通知留出可复用实体；Q3=A 使 FR-7 的「修改重提」名副其实且卖家无需每次重传图片；Q4=A 让新实体真正落库可用。保留完整规格与 D-029 / D-037 的既有尺度一致，context-rot 风险由 Step 4 三层审查兜底。
+*   **结果**：五项冻结为规格 `Intent` 的 `Decision ①–⑤`，`Open Questions` 清空，`route: dispatch`；CHECKPOINT 1 批准后未再发生重新协商。
+*   **事后验证**：实现与三层审查全部按冻结意图完成；`listings/admin.py` 保持空 diff，无新增驳回 / 审核入口；`0002_rejectionnotice.py` 由 `makemigrations` 生成并 `migrate` 应用。
+
+---
+## D-039: CHECKPOINT 1 批准并在同会话完成实现与审查
+
+*   **触发阶段**：`/bmad-build` Step 2 CHECKPOINT 1 → Step 5（Story 2.3）
+*   **智能体的建议**：三选项（批准并继续 / 批准并停止 / 先用子代理审规格），推荐批准并继续。
+*   **我们的判断与依据**：**采纳（批准并继续）**。
+    *   依据 1：四项意图缺口已由人类拍板并写入冻结区，规格通过 READY FOR DEVELOPMENT 自检，再开一轮规格审查边际收益低。
+    *   依据 2：同会话可避免规格重读与上下文重建，符合 D-030 的一贯选择。
+*   **结果**：spec `ready-for-dev → in-progress → in-review → done`；`sprint-status.yaml` 的 `2-3` → `in-progress` → `review`；实现由 dispatch 子代理完成，审查由三层子代理同步执行。
+*   **事后验证**：`test -v 2` → 123 tests OK，0 issues，范围 diff 为空。注意：dispatch 子代理再次越权把 spec / sprint 提前置 `done`，已由主代理在 Step 3 撤回并在 `Implementation Notes` 追加更正条（与 2.2 同类情况一致）——实现子代理不应自行做工作流状态同步。
+
+---
+## D-040: 三层审查 26 条发现 → 24 驳回 + 2 patch，接受 0 图守卫与界面入口回归断言
+
+*   **触发阶段**：`/bmad-build` Step 4 三层审查与 patch 路由
+*   **智能体的建议**：Blind Hunter 17 条 / Edge Case Hunter 8 条 / Verification Gap 1 条，共 26 条；逐条核验后建议 24 条驳回、2 条 `medium` → `patch`、0 defer、无 loopback。
+*   **我们的判断与依据**：**采纳（24 驳回 + 2 patch）**。
+    *   依据 1：多数 Blind Hunter 发现的修复=编辑本次 build 的规格工件，按 triage 规则一律驳回；并发 / 陈旧实例 / 未保存实例类与 2.2 BH-7、EC-2 同根因，本次仍无生产调用者，留待 5.1 引入真实审核调用者时补 DB 端校验。
+    *   依据 2：EC-7（0 图商品不传新图即可重提，绕过「每商品 ≥1 张图片」）与 VG-1（「我的消息」是冻结决策 ① 下唯一的界面重提入口，改坏 `can_resubmit` 后 120 用例仍全绿）都是可复现的真实缺口，最小修复琐碎、不增公共表面、只守护已演示状态 → `patch`。
+*   **结果**：resume 同一实现子代理下发 3 条最小修复——`resubmit_view` 加 0 图中文错误守卫且不写库；`RejectionNoticeAndResubmitTests` 由 18 例增至 21 例（入口出现 / 消失、`can_resubmit` 两态、0 图守卫），并给 2 个受守卫影响的夹具补图。
+*   **事后验证**：补丁后 `check` 0 issues、`makemigrations --check --dry-run` → No changes detected、`migrate` → No migrations to apply、`test -v 2` → **123 tests OK**（102 既有 + 21 新增），21 个新用例逐条 ok；`diff_file` 重刷为 73,165 B / 1002 行；`review_loop_iteration` 保持 0。
