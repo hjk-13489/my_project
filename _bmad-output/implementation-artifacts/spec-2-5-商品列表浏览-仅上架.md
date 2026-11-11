@@ -150,6 +150,27 @@ context:
 
 **分组与处置：** 无存活项，不产生分组；无 `intent_gap` / `bad_spec` 故不触发 loopback，`review_loop_iteration` 保持 0；无 `patch` 故不重派实现子代理；无 `defer` 故不改 `deferred-work.md`。Verification Gap 层的「无发现」结论与主代理独立复跑（`check` 0 issues、`makemigrations --check` → `No changes detected`、`test -v 2` → 151 tests OK、15 个新用例逐条 `... ok`、禁改文件 diff 为空）一致。
 
+### 2026-11-11 独立重审（第 2 轮，`@skill:bmad-code-review`）
+
+- 基准 `71861b90bf6a..HEAD`（`a3a208a`），统一 diff 68,644 B / 716 行 / 9 文件（+629 / −2）；`review_mode: full`，上下文 `epic-2-context.md` 与 `project-context.md` 均已加载；claims 为 `a3a208a` 的提交信息。
+- 激活层：团队级覆盖 `_bmad/custom/bmad-code-review.toml` 禁用 `blind-hunter` / `verification-gap`，本轮实际为 **Edge Case Hunter + Acceptance Auditor** 两层，同步并行、同模型能力，`failed_layers` 为空。Acceptance Auditor 独立复跑后确认六条 AC 与冻结功能约束在代码层面均满足。
+- 原始发现 9 条（EC 4 + AA 5），逐条核验后 **9 条全部驳回**（8 `false`、1 `low → rejected`），0 `high` / `medium` / `maybe-false`、0 `decision_needed` / `patch` / `defer`、无 `intent_gap` / `bad_spec` / loopback，`review_loop_iteration` 保持 0 → **Clean review**。
+- 主代理独立复跑（`.venv/Scripts/python.exe`）：`manage.py check` → 0 issues；`makemigrations --check --dry-run` → `No changes detected`；`manage.py test` → **151 tests OK**（87.878s，0 失败 / 跳过）。
+
+**Rejected（第 2 轮逐条）**
+
+- EC-1 `false` — 「`ProductImage` 行存在但 `image` 为空时 `thumb.image.url` 抛 ValueError → 公开页 500」：该状态不可达。`ProductImage.image = ImageField(upload_to='products/')` 默认 `blank=False`；全仓唯二写入点 `listings/views.py:38,85` 的实参均来自 `request.FILES.getlist('images')` 且经 `validate_images`（≥1 张、Pillow verify）校验，必有文件名；`listings/admin.py` 裸注册且 ImageField 表单必填、无 clear 入口；`resubmit_view:83` 是整行 `delete()` 不留空行。构造 `image=''` 需绕过 ORM 直接造数，未展示可达生产路径 → 按「未展示可达路径的失败不是缺陷」驳回（与首轮 EC-1 同口径）。
+- EC-2 `false` — 「`prefetch('images')` 无 `order_by`、`ProductImage` 无 `Meta.ordering`，首图取哪张由 DB 决定」：冻结决策 ③ 明确授权「走 `images` 反向关系取首图」，即接受 DB 默认顺序；`config/settings.py` 唯一后端为 sqlite3，无 ORDER BY 时按 rowid 稳定返回；151 用例中 `test_card_four_elements_and_first_image_url` 断言首图 URL 命中且只输出 1 个 `<img>`，审查者未展示任何一次首图跳变。补 `Prefetch(order_by('pk'))` 需引入 `ProductImage` import，属新增守卫而非直接更正。
+- EC-3 `false` — 「测试 `first_url` 取自无序 `images.all()`，非 SQLite 后端首图 URL 断言可能失败」：`settings.py` 只配置 `django.db.backends.sqlite3`，仓库无 MySQL 配置 / 依赖 / 启用路径（规格亦明确不改 `settings.py`）；测试查询与视图 prefetch 后的 `|first` 是同一无 ORDER BY 查询，顺序一致，151 用例通过。未启用的后端不构成当前交付的坏结果。
+- EC-4 `false` — 「`rmtree(ignore_errors=True)` 静默失败致残留 media 串入后续用例」：`setUp`（diff:296）在每个用例开头都重做 `rmtree` + `os.makedirs`，即便 `tearDownClass` 删除失败也会在下一用例前重试清理；模板只渲染 DB 中的 `ProductImage.image.url` 而不扫描目录；各用例图片 prefix 互异（`first_` / `mixed` / `q2_` / `q20_` / `perf_` / `other`），Django 对同名文件自动加后缀；151 用例 0 失败。声称的坏结果不成立。
+- AA-1 `false` — 「NFR-1 被降级为单次 GET < 1s，P95 ≤1s 与首屏 ≤2s 无任何覆盖」：AC-3 与冻结决策 ④ 已由人类于 21:25 拍板把本故事的可执行口径定为「查询数不随 N 增长 + 单次 GET < 1s」，代码与 `test_single_get_under_one_second` 完全符合 AC-3；`prd.md` 的 P95 / 首屏是上游指标，Implementation Notes 已将其列为交付范围外取舍。修复 = 编辑冻结规格 / PRD → 驳回（与首轮 BH-13 同口径）。
+- AA-2 `false` — 「规格声称 Step 4 三层同步并行无跳过层，与团队配置禁用两层矛盾，审计链不自洽」：两套工作流被混淆。团队覆盖文件按 skill-name 只作用于独立 `bmad-code-review`；Step 4 属 `bmad-build` 工作流，其 `.workbuddy/skills/bmad-build/customize.toml` 内置 `blind-hunter` / `edge-case-hunter` / `verification-gap` 三层，且 `_bmad/custom/` 下无 `bmad-build.toml` 覆盖文件（已核）。20 条 BH 发现可由 Step 4 正常产生；记忆日志 L6 的「两层」记述的是 2.4 的独立重审，轮次不同。修复 = 编辑本规格 → 驳回。
+- AA-3 `false` — 「新增测试大量 `status='approved'` 字面量，与冻结 Always『全仓字面量只在 `models.py:14`』冲突」：该条款约束的是「不得另写第二套门控」，Implementation Notes:157 与 Verification:214 已分别限定为「**查询**字面量」与「**生产代码**」；新增测试中的字面量全部是夹具赋值与状态断言（`p.status == 'approved'`），无一处用于查询过滤，AC-1 本身还强制该断言；生产代码检索结论可复现（视图走 `visible()`、`models.py:14` 唯一过滤）。不变量未破，修复 = 编辑本规格 → 驳回。
+- AA-4 `false` — 「frontmatter `status: done` 与 Implementation Notes 自述 `in-progress` 互相否定」：Implementation Notes:160 已明写「上一条记述的 `in-progress` 是 Step 3 时点快照，以本条为最终口径」；`done` / `review` 是 Step 5 收尾终态，与记忆日志 L36 一致。sprint diff 显示 `backlog → review` 只因单 commit 内的过程态未单独提交，不是流转错误。修复 = 订正规格记述 → 驳回（与 2.4 AA-3 同口径）。
+- AA-5 `low` → rejected — 「I/O 矩阵首图行要求 1–5 张图，用例只构造 3 张，缺 1 / 5 图边界」：事实成立，但模板 `product.images.all|first` 恒定只输出 1 个 `<img>`，与挂图数无关，属测试覆盖缺口而非功能缺陷；5 图边界已由 2.1 既有用例 `listings/tests.py:123,243` 覆盖，151 用例全绿。补 1 / 5 图用例属新增测试复杂度，日常演示不会遇到 → 按 `low` 驳回（与首轮 BH-10 同口径）。
+
+**分组与处置（本轮）：** 无存活项，不分组、不产生 `### Review Findings` action items、不改 `deferred-work.md`、不重派实现子代理；`new_status = done`，sprint `2-5-商品列表浏览-仅上架` 由 `review` 置 `done`，`last_updated` 同步为 `11-11-2026 23:11`。规格 frontmatter 已是 `done`，本轮不修改冻结区与 Implementation Notes 旧条（append-only）。
+
 ## Design Notes
 
 - **Step 2 事实与路径判定**：Intent gaps 原为 6 项（Q1 页面形态与 URL、Q2 访问门控、Q3 缩略图实现、Q4 列表规模与 NFR-1 口径、Q5 入口位置、Q6 规格体量），已由人类于 2026-11-11 21:25 全部拍板为 A / A / A / A / A / A 并写入冻结区 Decision ①–⑥；token gate 同轮选择 **Keep full spec**（接受 8,624 tokens 的 context-rot 风险，不拆分、不新增 deferred 项，沿用 D-029 / D-033 / D-034，由 Step 4 三层审查兜底）。Irreversibles = **无**（不新增迁移 / schema 变更、不删除或改写数据、不写 `media/`、无外部副作用，列表页是纯只读消费者）；Footprint ≈ 6 个文件（新增 1 视图 / 1 URL / 1 模板 / 1 测试类 + 2 个共享模板的入口追加），新增 1 个对外公开路由与 1 个模板，`base.html` / `index.html` 是 Epic 3/4 也依赖的共享表面。故 `route: dispatch`、写完整规格，不走 oneshot（与 spec-2-3、spec-2-4 一致）。
