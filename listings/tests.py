@@ -1136,3 +1136,354 @@ class MyListingsViewTests(TestCase):
         self.assertContains(page, product.get_status_display())
         self.assertContains(profile, '未认证卖家本人商品')
         self.assertFalse(page.context['my_listings_empty'])
+
+
+# ---------------------------------------------------------------------------
+# Story 2.5：商品列表浏览（仅上架）。本段自包含追加，不改动上方既有测试类。
+# ---------------------------------------------------------------------------
+import os
+import shutil
+import tempfile
+import time
+from datetime import timedelta
+from decimal import Decimal
+from io import BytesIO
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
+from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
+from django.utils import timezone
+from PIL import Image as PILImage
+
+from accounts.models import User
+from listings.models import Product, ProductImage, RejectionNotice
+
+_STORY25_MEDIA_ROOT = tempfile.mkdtemp(prefix='story25-media-')
+
+
+def _story25_image(name='photo.jpg', fmt='JPEG'):
+    """生成一张 Pillow 真实 JPEG/PNG 内存图片，供图片夹具使用。"""
+    buf = BytesIO()
+    PILImage.new('RGB', (8, 8), (200, 30, 30)).save(buf, format=fmt)
+    content_type = 'image/jpeg' if fmt == 'JPEG' else 'image/png'
+    return SimpleUploadedFile(name, buf.getvalue(), content_type=content_type)
+
+
+@override_settings(MEDIA_ROOT=_STORY25_MEDIA_ROOT)
+class ProductListViewTests(TestCase):
+    """覆盖 spec-2-5 I/O 矩阵：仅 approved（四态混合 + context 断言）、四要素与首图 URL、
+    无图中文占位、空列表中文空状态、倒序（context 与 HTML 双重断言）、三类访问门控均 200、
+    只读 405 且无写入、查询数不随 N 增长、单次 GET < 1s、他人 approved 可见但无隐私字段、
+    导航 / 首页入口与既有回归。"""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_STORY25_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        shutil.rmtree(_STORY25_MEDIA_ROOT, ignore_errors=True)
+        os.makedirs(_STORY25_MEDIA_ROOT, exist_ok=True)
+        self.owner = User.objects.create_user(
+            student_id='20252501', username='卖家甲', password='testpass12345'
+        )
+        self.other = User.objects.create_user(
+            student_id='20252502', username='卖家乙', password='testpass12345'
+        )
+        self.url = reverse('product_list')
+
+    # ---------- helpers ----------
+    def _make_product(self, title, status='approved', owner=None,
+                      price=Decimal('25.00'), condition='良好', category='教材'):
+        return Product.objects.create(
+            owner=owner or self.owner,
+            title=title,
+            description='描述文本-%s' % title,
+            price=price,
+            condition=condition,
+            category=category,
+            status=status,
+        )
+
+    def _attach_images(self, product, count=1, prefix='img'):
+        for i in range(count):
+            ProductImage.objects.create(
+                product=product, image=_story25_image(f'{prefix}_{i}.jpg')
+            )
+
+    def _set_created_at(self, product, when):
+        Product.objects.filter(pk=product.pk).update(created_at=when)
+        product.refresh_from_db()
+        return product
+
+    def _snapshot(self):
+        return list(
+            Product.objects.values(
+                'pk', 'owner_id', 'title', 'description', 'price', 'condition',
+                'category', 'status', 'created_at', 'updated_at',
+            ).order_by('pk')
+        )
+
+    def _four_status_products(self):
+        specs = (
+            ('教材甲25', 'pending', Decimal('11.11')),
+            ('教材乙25', 'approved', Decimal('22.22')),
+            ('教材丙25', 'rejected', Decimal('33.33')),
+            ('教材丁25', 'offline', Decimal('44.44')),
+        )
+        return [
+            self._make_product(title, status=status, price=price)
+            for title, status, price in specs
+        ]
+
+    def _count_queries_for_get(self):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        return len(ctx)
+
+    # ---------- 仅 approved（唯一门控 + 四态混合）----------
+    def test_only_approved_products_in_context_and_html(self):
+        products = self._four_status_products()
+        approved = [p for p in products if p.status == 'approved'][0]
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, 'listings/product_list.html')
+        listed = list(resp.context['products'])
+        self.assertEqual(listed, [approved])
+        self.assertTrue(all(p.status == 'approved' for p in listed))
+        # visible() 是对外唯一门控：context 与它返回的数量一致
+        self.assertEqual(Product.objects.visible().count(), len(listed))
+        self.assertFalse(resp.context['products_empty'])
+        self.assertContains(resp, approved.title)
+        self.assertContains(resp, '¥%s' % approved.price)
+        self.assertContains(resp, approved.get_condition_display())
+        # 非上架商品的标题 / 价格 / 描述 / 状态一律不进模板
+        for p in products:
+            if p.status != 'approved':
+                self.assertNotContains(resp, p.title)
+                self.assertNotContains(resp, str(p.price))
+        self.assertNotContains(resp, '描述文本')
+        self.assertNotContains(resp, approved.get_status_display())
+
+    # ---------- 四要素 + 首图（1–5 张图只输出 1 个 <img>）----------
+    def test_card_four_elements_and_first_image_url(self):
+        product = self._make_product(
+            '高等数学25', status='approved', price=Decimal('25.00'), condition='全新'
+        )
+        self._attach_images(product, count=3, prefix='first')
+        images = list(product.images.all())
+        first_url = images[0].image.url
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context['products_empty'])
+        self.assertContains(resp, '<img', count=1)
+        self.assertContains(resp, 'src="%s"' % first_url)
+        for image in images[1:]:
+            self.assertNotContains(resp, image.image.url)
+        self.assertContains(resp, '高等数学25')
+        self.assertContains(resp, '¥25.00')
+        self.assertContains(resp, product.get_condition_display())
+        self.assertNotContains(resp, '描述文本')
+        self.assertNotContains(resp, product.get_status_display())
+        self.assertNotContains(resp, '卖家甲')
+        self.assertNotContains(resp, 'card-img-top product-thumb-empty')
+
+    # ---------- 无图中文占位 ----------
+    def test_no_image_shows_chinese_placeholder(self):
+        product = self._make_product('无图商品25', status='approved')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '暂无图片')
+        self.assertNotContains(resp, '<img')
+        self.assertContains(resp, '无图商品25')
+        self.assertContains(resp, '¥25.00')
+        self.assertContains(resp, product.get_condition_display())
+
+    def test_mixed_images_and_no_image_only_one_img_tag(self):
+        with_image = self._make_product('有图商品25', status='approved')
+        self._attach_images(with_image, count=1, prefix='mixed')
+        self._make_product('无图商品25', status='approved')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '<img', count=1)
+        self.assertContains(resp, '暂无图片')
+
+    # ---------- 空列表中文空状态 ----------
+    def test_empty_list_shows_chinese_empty_state(self):
+        self._make_product('仅有待审核25', status='pending')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['products_empty'])
+        self.assertEqual(list(resp.context['products']), [])
+        self.assertContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, 'card h-100')
+        self.assertNotContains(resp, '仅有待审核25')
+        self.assertNotContains(resp, '暂无图片')
+
+    def test_truly_empty_db_shows_chinese_empty_state(self):
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['products_empty'])
+        self.assertContains(resp, '暂无上架商品')
+
+    # ---------- 倒序（context 与 HTML 双重断言）----------
+    def test_ordered_by_created_at_desc(self):
+        products = [
+            self._make_product(f'倒序商品{i}25', status='approved') for i in range(4)
+        ]
+        now = timezone.now()
+        for i, product in enumerate(products):
+            self._set_created_at(product, now - timedelta(days=4 - i))
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        newest_first = list(reversed(products))
+        self.assertEqual(
+            [p.pk for p in resp.context['products']],
+            [p.pk for p in newest_first],
+        )
+        html = resp.content.decode()
+        positions = [html.index(p.title) for p in newest_first]
+        self.assertEqual(positions, sorted(positions))
+
+    # ---------- 访问门控：匿名 / 已登录 / 已登录未认证 均 200 ----------
+    def test_public_access_for_three_user_states(self):
+        approved = self._make_product('公开可见25', status='approved')
+        for title, status in (
+            ('隐藏待审25', 'pending'),
+            ('隐藏驳回25', 'rejected'),
+            ('隐藏下架25', 'offline'),
+        ):
+            self._make_product(title, status=status)
+
+        cases = [('匿名', self.client.get(self.url))]
+
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        self.client.force_login(self.owner)
+        cases.append(('已登录已认证', self.client.get(self.url)))
+
+        self.owner.is_verified = False
+        self.owner.save(update_fields=['is_verified'])
+        cases.append(('已登录未认证', self.client.get(self.url)))
+
+        for label, resp in cases:
+            with self.subTest(label=label):
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(list(resp.context['products']), [approved])
+                self.assertContains(resp, '公开可见25')
+                for title in ('隐藏待审25', '隐藏驳回25', '隐藏下架25'):
+                    self.assertNotContains(resp, title)
+
+    # ---------- 只读：405 / 无写入 ----------
+    def test_unsafe_methods_return_405_without_writes(self):
+        self._four_status_products()
+        before = self._snapshot()
+        for method in (self.client.post, self.client.put, self.client.patch, self.client.delete):
+            resp = method(self.url, {'title': 'hacked'})
+            self.assertEqual(resp.status_code, 405, msg=method)
+            self.assertEqual(resp['Allow'], 'GET, HEAD')
+        self.assertEqual(self.client.head(self.url).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(ProductImage.objects.count(), 0)
+        self.assertEqual(RejectionNotice.objects.count(), 0)
+
+    def test_get_is_read_only(self):
+        self._four_status_products()
+        before = self._snapshot()
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+
+    # ---------- NFR-1：查询数不随商品数增长 + 单次 GET < 1s ----------
+    def test_query_count_does_not_grow_with_n(self):
+        for i in range(2):
+            product = self._make_product(f'查询数商品{i}25', status='approved')
+            self._attach_images(product, count=1, prefix=f'q2_{i}')
+        q_small = self._count_queries_for_get()
+
+        for i in range(18):
+            product = self._make_product(f'查询数大商品{i}25', status='approved')
+            self._attach_images(product, count=1, prefix=f'q20_{i}')
+        q_large = self._count_queries_for_get()
+
+        self.assertEqual(q_small, q_large)
+        # 预取生效：20 件含图商品不应退化为 N+1（应远小于商品数）
+        self.assertLessEqual(q_large, 5)
+
+    def test_single_get_under_one_second(self):
+        for i in range(20):
+            product = self._make_product(f'性能商品{i}25', status='approved')
+            self._attach_images(product, count=1, prefix=f'perf_{i}')
+        start = time.perf_counter()
+        resp = self.client.get(self.url)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(resp.status_code, 200)
+        self.assertLess(elapsed, 1.0)
+
+    # ---------- 他人 approved 可见但无隐私字段 ----------
+    def test_other_users_approved_products_visible_without_private_fields(self):
+        own = self._make_product('本人上架25', status='approved', owner=self.owner)
+        other_approved = self._make_product(
+            '他人上架25', status='approved', owner=self.other,
+            price=Decimal('88.88'), condition='中等',
+        )
+        self._make_product('他人待审25', status='pending', owner=self.other)
+        self._attach_images(other_approved, count=1, prefix='other')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            {p.pk for p in resp.context['products']}, {own.pk, other_approved.pk}
+        )
+        self.assertContains(resp, '他人上架25')
+        self.assertContains(resp, '¥88.88')
+        self.assertContains(resp, other_approved.get_condition_display())
+        self.assertContains(resp, '本人上架25')
+        self.assertNotContains(resp, '他人待审25')
+        self.assertNotContains(resp, '卖家乙')
+        self.assertNotContains(resp, '卖家甲')
+        self.assertNotContains(resp, '描述文本')
+        self.assertNotContains(resp, '待审核')
+        self.assertNotContains(resp, 'QQ')
+        self.assertNotContains(resp, '微信')
+
+    # ---------- 导航 / 首页入口与既有硬断言回归 ----------
+    def test_nav_and_home_entries_for_all_users(self):
+        list_url = reverse('product_list')
+        self.assertEqual(list_url, '/listings/')
+        home = reverse('home')
+
+        # 匿名：导航栏与首页正文两处入口，既有「请注册或登录」不变
+        anon = self.client.get(home)
+        self.assertEqual(anon.status_code, 200)
+        self.assertContains(anon, '请注册或登录')
+        self.assertContains(anon, '商品浏览')
+        self.assertContains(anon, 'href="%s"' % list_url, count=2)
+
+        # 已登录：导航入口在所有渲染 base.html 的页面均可见
+        self.client.force_login(self.owner)
+        for url in (home, reverse('verify'), reverse('profile'), list_url):
+            with self.subTest(url=url):
+                page = self.client.get(url)
+                self.assertEqual(page.status_code, 200)
+                self.assertContains(page, 'href="%s"' % list_url)
+                self.assertContains(page, '商品浏览')
+        logged_home = self.client.get(home)
+        self.assertContains(logged_home, '发布商品', count=1)
+
+        # 已认证：既有认证成功文案不变
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        self.assertContains(
+            self.client.get(home), '你的账号已通过认证'
+        )
+
+    def test_existing_listing_templates_regression(self):
+        self.client.force_login(self.owner)
+        resp = self.client.get(reverse('my_listings'))
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, 'listings/my_listings.html')
+        # listings/tests.py:962 硬断言：我的发布页不含 <img>
+        self.assertNotContains(resp, '<img')
+        self.assertEqual(self.client.get(reverse('profile')).status_code, 200)

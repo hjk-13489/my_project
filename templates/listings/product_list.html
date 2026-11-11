@@ -1,0 +1,52 @@
+{% extends 'base.html' %}
+
+{% block title %}商品浏览 - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<style>
+    .product-thumb {
+        width: 100%;
+        height: 180px;
+        object-fit: cover;
+    }
+    .product-thumb-empty {
+        height: 180px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: #f1f3f5;
+        color: #6c757d;
+    }
+</style>
+
+<div class="row mb-4">
+    <div class="col">
+        <h2 class="text-center">商品浏览</h2>
+    </div>
+</div>
+
+{% if products_empty %}
+    <p class="text-muted text-center mb-0">暂无上架商品</p>
+{% else %}
+    <div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 row-cols-lg-4 g-4">
+        {% for product in products %}
+            <div class="col">
+                <div class="card h-100">
+                    {% with thumb=product.images.all|first %}
+                        {% if thumb %}
+                            <img src="{{ thumb.image.url }}" class="card-img-top product-thumb" alt="商品缩略图">
+                        {% else %}
+                            <div class="card-img-top product-thumb-empty">暂无图片</div>
+                        {% endif %}
+                    {% endwith %}
+                    <div class="card-body">
+                        <h5 class="card-title">{{ product.title }}</h5>
+                        <p class="card-text mb-1">¥{{ product.price }}</p>
+                        <p class="card-text text-muted mb-0">成色：{{ product.get_condition_display }}</p>
+                    </div>
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+{% endif %}
+{% endblock %}
