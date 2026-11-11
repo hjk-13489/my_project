@@ -877,3 +877,262 @@ class RejectionNoticeAndResubmitTests(TestCase):
         self.assertEqual(product.title, '原商品标题')
         self.assertEqual(product.images.count(), 0)
         self.assertEqual(RejectionNotice.objects.count(), notices_before)
+
+
+# ---------------------------------------------------------------------------
+# Story 2.4：查看我的发布。本段自包含追加，不改动上方既有测试类。
+# ---------------------------------------------------------------------------
+from datetime import timedelta
+from decimal import Decimal
+
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+from django.urls import reverse
+from django.utils import timezone
+
+from listings.models import Product, ProductImage, RejectionNotice
+
+
+class MyListingsViewTests(TestCase):
+    """覆盖 spec-2-4 I/O 矩阵：两处空状态、四态中文展示、倒序、仅 rejected 重提入口、
+    个人中心摘要与「查看全部」、他人数据隔离、登录门控、只读 405 / 无写入、未认证可读。"""
+
+    def setUp(self):
+        self.User = get_user_model()
+        self.owner = self.User.objects.create_user(
+            student_id='20242401', username='卖家甲', password='testpass12345'
+        )
+        self.other = self.User.objects.create_user(
+            student_id='20242402', username='卖家乙', password='testpass12345'
+        )
+        self.url = reverse('my_listings')
+        self.profile_url = reverse('profile')
+
+    def _login(self, user=None):
+        self.client.force_login(user or self.owner)
+
+    def _make_product(self, owner, title, status='pending', price=Decimal('25.00'),
+                      condition='良好', category='教材'):
+        return Product.objects.create(
+            owner=owner,
+            title=title,
+            description='描述文本',
+            price=price,
+            condition=condition,
+            category=category,
+            status=status,
+        )
+
+    def _four_status_products(self):
+        specs = (
+            ('本人待审核书', 'pending', Decimal('11.11'), '全新'),
+            ('本人已上架书', 'approved', Decimal('22.22'), '良好'),
+            ('本人已驳回书', 'rejected', Decimal('33.33'), '中等'),
+            ('本人已下架书', 'offline', Decimal('44.44'), '全新'),
+        )
+        return [
+            self._make_product(self.owner, title, status, price, condition)
+            for title, status, price, condition in specs
+        ]
+
+    def _set_created_at(self, product, when):
+        Product.objects.filter(pk=product.pk).update(created_at=when)
+        product.refresh_from_db()
+        return product
+
+    def _snapshot(self):
+        return list(
+            Product.objects.values(
+                'pk', 'owner_id', 'title', 'description', 'price', 'condition',
+                'category', 'status', 'created_at', 'updated_at',
+            ).order_by('pk')
+        )
+
+    # ---- 两处中文空状态 ----
+    def test_standalone_page_empty_state(self):
+        self._login()
+        self.assertEqual(self.url, '/listings/mine/')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, 'listings/my_listings.html')
+        self.assertContains(resp, '我的发布')
+        self.assertContains(resp, '暂无发布记录，你还没有发布任何商品')
+        self.assertTrue(resp.context['my_listings_empty'])
+        self.assertEqual(list(resp.context['my_listings']), [])
+        self.assertNotContains(resp, '<img')
+        self.assertNotContains(resp, '修改并重新提交')
+
+    def test_profile_card_empty_state_and_four_sections_regression(self):
+        self._login()
+        resp = self.client.get(self.profile_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['my_listings_empty'])
+        self.assertEqual(list(resp.context['my_listings']), [])
+        self.assertContains(resp, '暂无发布记录，你还没有发布任何商品')
+        # accounts/tests.py:643-654 的四板块空状态断言不破
+        self.assertContains(resp, '我的发布')
+        self.assertContains(resp, '我的订单')
+        self.assertContains(resp, '我的消息')
+        self.assertContains(resp, '我的评价')
+        self.assertContains(resp, '暂无订单记录')
+        self.assertContains(resp, '暂无消息记录')
+        self.assertContains(resp, '暂无评价记录')
+        self.assertTrue(resp.context['my_orders_empty'])
+        self.assertTrue(resp.context['my_messages_empty'])
+        self.assertTrue(resp.context['my_reviews_empty'])
+        # 「查看全部」入口始终指向独立页
+        self.assertContains(resp, '查看全部')
+        self.assertContains(resp, f'href="{self.url}"')
+
+    # ---- 四态全展示、状态唯一来源、倒序 ----
+    def test_four_statuses_show_chinese_display_and_fields(self):
+        products = self._four_status_products()
+        self._login()
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context['my_listings_empty'])
+        for product in products:
+            self.assertContains(resp, product.title)
+            self.assertContains(resp, product.get_status_display())
+            self.assertContains(resp, str(product.price))
+            self.assertContains(resp, product.get_condition_display())
+            self.assertContains(resp, product.created_at.strftime('%Y-%m-%d %H:%M'))
+        for label in ('待审核', '已上架', '已驳回', '已下架'):
+            self.assertContains(resp, label)
+        self.assertNotContains(resp, '<img')
+
+    def test_status_values_are_legal_and_display_from_choices(self):
+        self._four_status_products()
+        self._login()
+        resp = self.client.get(self.url)
+        statuses = {p.status for p in resp.context['my_listings']}
+        self.assertEqual(statuses, {'pending', 'approved', 'offline', 'rejected'})
+        choices = dict(Product.STATUS_CHOICES)
+        for product in resp.context['my_listings']:
+            self.assertEqual(product.get_status_display(), choices[product.status])
+
+    def test_list_ordered_by_created_at_desc(self):
+        products = self._four_status_products()
+        now = timezone.now()
+        for i, product in enumerate(products):
+            self._set_created_at(product, now - timedelta(days=4 - i))
+        self._login()
+        resp = self.client.get(self.url)
+        newest_first = list(reversed(products))
+        self.assertEqual(
+            [p.pk for p in resp.context['my_listings']],
+            [p.pk for p in newest_first],
+        )
+        html = resp.content.decode()
+        positions = [html.index(p.title) for p in newest_first]
+        self.assertEqual(positions, sorted(positions))
+
+    # ---- 仅 rejected 商品复用既有 resubmit 路由 ----
+    def test_resubmit_link_only_on_rejected(self):
+        products = self._four_status_products()
+        by_status = {p.status: p for p in products}
+        self._login()
+        resp = self.client.get(self.url)
+        self.assertContains(resp, '修改并重新提交', count=1)
+        rejected_url = reverse('resubmit', args=[by_status['rejected'].pk])
+        self.assertContains(resp, f'href="{rejected_url}"')
+        for status in ('pending', 'approved', 'offline'):
+            url = reverse('resubmit', args=[by_status[status].pk])
+            self.assertNotContains(resp, f'href="{url}"')
+
+    # ---- 个人中心摘要与入口 ----
+    def test_profile_card_shows_summary_and_view_all_link(self):
+        p1 = self._make_product(self.owner, '本人甲商品', 'approved')
+        p2 = self._make_product(self.owner, '本人乙商品', 'offline')
+        self._login()
+        resp = self.client.get(self.profile_url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.context['my_listings_empty'])
+        self.assertContains(resp, '本人甲商品')
+        self.assertContains(resp, '本人乙商品')
+        self.assertContains(resp, '已上架')
+        self.assertContains(resp, '已下架')
+        self.assertContains(resp, '查看全部')
+        self.assertContains(resp, f'href="{self.url}"')
+        self.assertEqual(
+            {p.pk for p in resp.context['my_listings']}, {p1.pk, p2.pk}
+        )
+        self.assertTrue(
+            all(p.owner_id == self.owner.pk for p in resp.context['my_listings'])
+        )
+
+    # ---- 他人数据服务端隔离（含 response.context owner 断言）----
+    def test_other_user_data_isolation(self):
+        own = self._make_product(self.owner, '本人专属标题ABC', 'pending', Decimal('12.34'))
+        others = [
+            self._make_product(self.other, title, status, price, '中等')
+            for status, title, price in (
+                ('pending', '他人专属标题P', Decimal('9001.01')),
+                ('approved', '他人专属标题A', Decimal('9002.02')),
+                ('rejected', '他人专属标题R', Decimal('9003.03')),
+                ('offline', '他人专属标题O', Decimal('9004.04')),
+            )
+        ]
+        self._login()
+        page = self.client.get(self.url)
+        profile = self.client.get(self.profile_url)
+        for resp in (page, profile):
+            self.assertEqual(resp.status_code, 200)
+            self.assertContains(resp, '本人专属标题ABC')
+            for other in others:
+                self.assertNotContains(resp, other.title)
+                self.assertNotContains(resp, str(other.price))
+            self.assertTrue(
+                all(p.owner_id == self.owner.pk for p in resp.context['my_listings'])
+            )
+        self.assertEqual([p.pk for p in page.context['my_listings']], [own.pk])
+
+    # ---- 登录门控 ----
+    def test_unauthenticated_redirects_to_login_with_next(self):
+        product = self._make_product(self.owner, '匿名不可见标题', 'approved')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, f'/login/?next={self.url}')
+        followed = self.client.get(self.url, follow=True)
+        self.assertNotContains(followed, product.title)
+
+    def test_unauthenticated_post_also_redirects(self):
+        resp = self.client.post(self.url, {'foo': 'bar'})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.url, f'/login/?next={self.url}')
+
+    # ---- 只读：405 / 无写入 ----
+    def test_read_only_methods_return_405_without_writes(self):
+        self._four_status_products()
+        self._login()
+        before = self._snapshot()
+        for method in (self.client.post, self.client.put, self.client.patch, self.client.delete):
+            resp = method(self.url, {'title': 'hacked'})
+            self.assertEqual(resp.status_code, 405, msg=method)
+            self.assertEqual(resp['Allow'], 'GET, HEAD')
+        self.assertEqual(self.client.head(self.url).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(ProductImage.objects.count(), 0)
+        self.assertEqual(RejectionNotice.objects.count(), 0)
+
+    def test_get_is_read_only_on_both_pages(self):
+        self._four_status_products()
+        self._login()
+        before = self._snapshot()
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+        self.assertEqual(self.client.get(self.profile_url).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+
+    # ---- 未认证用户可读 ----
+    def test_unverified_user_can_read_own_data(self):
+        product = self._make_product(self.owner, '未认证卖家本人商品', 'pending')
+        self.assertFalse(self.owner.is_verified)
+        self._login()
+        page = self.client.get(self.url)
+        profile = self.client.get(self.profile_url)
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(profile.status_code, 200)
+        self.assertContains(page, '未认证卖家本人商品')
+        self.assertContains(page, product.get_status_display())
+        self.assertContains(profile, '未认证卖家本人商品')
+        self.assertFalse(page.context['my_listings_empty'])

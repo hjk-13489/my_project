@@ -61,8 +61,16 @@
                 {% if my_listings_empty %}
                     <p class="text-muted mb-0">暂无发布记录，你还没有发布任何商品</p>
                 {% else %}
-                    {# 后续 Epic 2 以 filter(owner=profile_user) 替换空状态 #}
+                    <ul class="list-group list-group-flush">
+                        {% for product in my_listings %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                <span>{{ product.title }}</span>
+                                <span class="badge bg-secondary">{{ product.get_status_display }}</span>
+                            </li>
+                        {% endfor %}
+                    </ul>
                 {% endif %}
+                <a href="{% url 'my_listings' %}" class="btn btn-outline-secondary btn-sm mt-3">查看全部</a>
             </div>
         </div>
     </div>

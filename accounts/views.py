@@ -6,7 +6,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST, require_safe
 from .forms import LoginForm, RegisterForm, VerificationForm
 from .models import VerificationRequest
-from listings.models import RejectionNotice
+from listings.models import Product, RejectionNotice
 
 
 def register(request):
@@ -132,12 +132,17 @@ def profile_view(request):
         .select_related('product')
         .order_by('-created_at')
     )
+    # 「我的发布」按 owner=profile_user 从 Product.objects 基础查询集取回本人全部商品，
+    # 不经 visible()，四态（pending/approved/rejected/offline）对卖家本人均可见；
+    # 只读展示，排序沿用 Product.Meta.ordering('-created_at')。
+    my_listings = list(Product.objects.filter(owner=profile_user))
     return render(request, 'accounts/profile.html', {
         'profile_user': profile_user,
         'verification_requests': profile_user.verification_requests.all(),
-        # 方案 A「壳 + 空状态」：其余三板块暂无业务数据，统一空状态；Epic 3/4
+        # 方案 A「壳 + 空状态」：订单 / 评价两板块暂无业务数据，统一空状态；Epic 3/4
         # 接入真实数据时，以 filter(buyer=profile_user) / filter(owner=profile_user) 替换。
-        'my_listings_empty': True,
+        'my_listings': my_listings,
+        'my_listings_empty': not my_listings,
         'my_orders_empty': True,
         'my_messages': my_messages,
         'my_messages_empty': not my_messages,

@@ -1,7 +1,7 @@
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.shortcuts import get_object_or_404, render
-from django.views.decorators.http import require_http_methods
+from django.views.decorators.http import require_http_methods, require_safe
 
 from .forms import ProductForm, validate_images
 from .models import Product, ProductImage, RejectionNotice
@@ -95,4 +95,19 @@ def resubmit_view(request, pk):
         'product': product,
         'reason': latest_notice.reason if latest_notice else '',
         'image_count': product.images.count(),
+    })
+
+
+# @login_required 外层：未登录 302 到登录页（带 next）；内层 @require_safe
+# 仅放行 GET/HEAD，其余方法 405（Allow: GET, HEAD）且不产生任何写入。
+# 卖家本人视图用 Product.objects 基础查询集（不经 visible()），四态全部可见，
+# 只读、不改状态、不接受请求传值；排序沿用 Product.Meta.ordering('-created_at')。
+@login_required
+@require_safe
+def my_listings_view(request):
+    """我的发布：按 owner=request.user 只读呈现本人全部商品（四态、创建时间倒序）。"""
+    my_listings = list(Product.objects.filter(owner=request.user))
+    return render(request, 'listings/my_listings.html', {
+        'my_listings': my_listings,
+        'my_listings_empty': not my_listings,
     })
