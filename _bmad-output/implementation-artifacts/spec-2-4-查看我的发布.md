@@ -140,6 +140,31 @@ context:
 
 **分组与处置：** 无存活项，不产生分组；无 `intent_gap` / `bad_spec` 故不触发 loopback，`review_loop_iteration` 保持 0；无 `patch` 故不重派实现子代理；无 `defer` 故不改 `deferred-work.md`。Verification Gap 层的「无发现」结论与主代理独立复跑（`check` 0 issues、`makemigrations --check` No changes、`test -v 2` 136 tests OK、13 个新用例逐条 `... ok`）一致。
 
+### 2026-11-11 独立重审（第 2 轮，`@skill:bmad-code-review`）
+
+- 基准 `79107cb..HEAD`（`c0fbcdb`），统一 diff 59,952 B / 633 行 / 9 文件（+524 / −7）；`review_mode: full`，上下文 `epic-2-context.md` 与 `project-context.md` 均已加载。
+- 激活层：团队级覆盖 `_bmad/custom/bmad-code-review.toml` 显式禁用 `blind-hunter` / `verification-gap`（注释「产出/消耗比低」），本轮实际为 **Edge Case Hunter + Acceptance Auditor** 两层，同步并行、同模型能力，`failed_layers` 为空。Acceptance Auditor 独立复跑后确认 AC-1～AC-6 与冻结意图在实现代码层面均无违背。
+- 原始发现 13 条（EC 10 + AA 3），逐条核验后 **13 条全部驳回**（9 `false`、4 `low → rejected`），0 `high` / `medium` / `maybe-false`、0 `decision_needed` / `patch` / `defer`、无 `intent_gap` / `bad_spec` / loopback，`review_loop_iteration` 保持 0 → **Clean review**。
+- 主代理独立复跑（`.venv/Scripts/python.exe`）：`manage.py check` → 0 issues；`makemigrations --check --dry-run` → `No changes detected`；`manage.py test` → **136 tests OK**。
+
+**Rejected（第 2 轮逐条）**
+
+- EC-1 `low` → rejected — 「`listings/views.py:109` 两件商品 `created_at` 相同、无 tiebreaker 导致顺序不定」：`Product.Meta.ordering=('-created_at',)`（`models.py:69`）是冻结决策 ③ 指定的排序来源，SQLite 对相同排序键按 rowid 稳定返回，`test_list_ordered_by_created_at_desc` 用四个互异时间戳对 context 与 HTML 双重断言倒序；补 `-pk` 属新增排序守卫且日常不会遇到 → 按 `low` 驳回。
+- EC-2 `false` — 「`accounts/views.py:138` 摘要未显式 `order_by`，日后改 Meta 会静默破坏」：冻结决策 ③ 明文要求沿用 `Product.Meta.ordering`，「日后改 Meta」是未展示的假设路径，当前排序符合意图，声称的坏结果不成立。
+- EC-3 `false` — 「`templates/listings/my_listings.html:18` 越界 `status` 显示原始值」：`ProductForm` 不含 status（`forms.py:52`），`publish_view` 强制 `status='pending'`（`views.py:35`），流转只经 `_transition()` 且受 `ALLOWED_TRANSITIONS` 约束（`models.py:39-44,97-107`），越界值无可达生产路径；加兜底分支还与冻结区「状态文案唯一来源」冲突。
+- EC-4 `false` — 「`my_listings.html:22` 越界 `condition` 显示原始值」：`condition` 是 ModelForm ChoiceField（`forms.py:55,71,90-91`），越界值落库路径不存在；同 EC-3。
+- EC-5 `false` — 「`templates/accounts/profile.html:68` 卡片徽标泄露原始状态值」：与 EC-3 同根因，越界状态不可达，且 `get_status_display()` 本就是唯一文案来源。
+- EC-6 `false` — 「`my_listings.html:25` 新增 / 越界状态无兜底、静默无重提入口」：新增状态属 5.2 之后的故事，当前四态由 `STATUS_CHOICES` 固定；为未展示状态补分支不构成缺陷。
+- EC-7 `low` → rejected — 「未认证用户持有 `rejected` 商品时仍渲染重提链接、点击撞 `is_verified` 认证墙」：2.3 既有测试 `test_unverified_user_gets_prompt_page`（`tests.py:653-663`）证明该状态可达，但 `resubmit_view:54-55` 明确返回 200 +「需先完成学号认证」引导页，是有意处理而非错误，规格矩阵亦要求未认证用户与已认证同规则渲染；加 `and user.is_verified` 属新增模板分支且改变冻结决策 ④ → 按 `low` 驳回。
+- EC-8 `false` — 「空状态仍渲染「查看全部」、进入同样为空的独立页」：本规格「已知取舍（交付范围外）」已明载该行为，`test_profile_card_empty_state_and_four_sections_regression` 亦显式断言空状态下包含「查看全部」与 href，属预期行为而非缺陷。
+- EC-9 `low` → rejected — 「独立页商品量大时全量载入、页面超长」：冻结决策 ③ 明确不做分页，演示 / 课堂规模下不会遇到；加切片或分页属新 UI 与参数且需改动冻结规格 → 驳回。
+- EC-10 `low` → rejected — 「个人中心卡片无限膨胀」：同 EC-9，冻结决策 ③ 排除分页 / 分组 / 缩略图；加 `[:5]` 会静默隐藏本人商品，与「至少呈现本人商品标题与中文状态」意图相悖 → 驳回。
+- AA-1 `false` — 「diff 多出第 9 个文件 `.workbuddy/memory/2026-11-11.md`，超出 Implementation Notes 八项清单 / AC-6 交付范围」：AC-6 逐项约束（禁改文件无改动、check 0 issues、`No changes detected`）经独立复跑全部满足；该文件是工作流日志，非运行时代码或受禁文件，不影响功能；「清单不全」的修复 = 编辑本规格 → 驳回。
+- AA-2 `false` — 「sprint `last_updated` 17:47 与本规格记载 17:10 矛盾」：本规格该句是 Step 3 时点快照，记忆日志 L32 明载 Step 5 同步为 17:47，diff 与磁盘一致，属时点差；修复 = 编辑本规格 → 驳回。
+- AA-3 `false` — 「规格 frontmatter `status: done` 与「done 留待后续独立代码审查」及 sprint `review` 不自洽」：build Step 5 先置规格 `done`、sprint 留 `review`，正是留给本次独立审查收尾的阶段差（记忆日志 L32 明载）；本轮 Step 4 已把 sprint 同步为 `done`，状态归一是本轮动作而非缺陷；修复 = 编辑本规格 → 驳回。
+
+**分组与处置（本轮）：** 无存活项，不分组、不产生 `### Review Findings` action items、不改 `deferred-work.md`、不重派实现子代理；`new_status = done`，sprint `2-4-查看我的发布` 由 `review` 置 `done`。
+
 ## Design Notes
 
 - **Step 2 事实与路径判定**：Intent gaps 原为 4 项，已由人类于 2026-11-11 全部拍板（冻结区 Decision ①–④），规格体量按决策 ⑤ 保留完整、不拆分；Irreversibles = **无**（无迁移、无 schema 变更、无数据删除 / 写入、无外部副作用；决策 ④ 明确排除删除，故也不引入运行时的不可逆操作）；Footprint ≈ 6 个文件，新增 1 个 URL / 1 个模板 / 1 个视图，`profile_view` 上下文与 `profile.html` 卡片是 Epic 3/4 也要依赖的共享表面。故 `route: dispatch`、写完整规格，不走 oneshot（与 spec-2-3:163 一致）。
