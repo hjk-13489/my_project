@@ -1,5 +1,6 @@
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404, render
 from django.views.decorators.http import require_http_methods, require_safe
 
@@ -116,14 +117,25 @@ def my_listings_view(request):
 # @require_safe 仅放行 GET/HEAD，其余方法 405（Allow: GET, HEAD）且不产生任何写入。
 # 买家侧公开只读页：不加 @login_required、不要求 is_verified，匿名 / 已登录均可见。
 # 对外可见性唯一门控是 Product.objects.visible()（models.py:12-14），此处直接链式复用，
-# 不另写 status 过滤、不写任何状态、不接受请求传值做筛选或排序；
+# 不另写 status 过滤、不写任何状态；唯一消费的请求参数是关键词 q（strip() 归一化后作
+# 整串单一子串、大小写不敏感的标题/描述包含匹配），其余参数一律忽略，为 2.7 组合筛选预留。
 # prefetch_related('images') 一次取回全部首图，消除 N+1；
 # 排序沿用 Product.Meta.ordering('-created_at')，全量上架商品均可达，不分页 / 不截断。
 @require_safe
 def product_list_view(request):
-    """商品列表（买家侧，公开只读）：仅上架商品，含缩略图 / 标题 / 价格 / 中文成色。"""
-    products = list(Product.objects.visible().prefetch_related('images'))
+    """商品列表（买家侧，公开只读）：仅上架商品，可按关键词搜索标题或描述。"""
+    search_query = request.GET.get('q', '').strip()
+    search_active = bool(search_query)
+    products_qs = Product.objects.visible()
+    if search_active:
+        products_qs = products_qs.filter(
+            Q(title__icontains=search_query) | Q(description__icontains=search_query)
+        )
+    products = list(products_qs.prefetch_related('images'))
     return render(request, 'listings/product_list.html', {
         'products': products,
         'products_empty': not products,
+        'search_query': search_query,
+        'search_active': search_active,
+        'result_count': len(products),
     })

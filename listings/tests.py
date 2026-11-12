@@ -1487,3 +1487,498 @@ class ProductListViewTests(TestCase):
         # listings/tests.py:962 硬断言：我的发布页不含 <img>
         self.assertNotContains(resp, '<img')
         self.assertEqual(self.client.get(reverse('profile')).status_code, 200)
+
+
+# ---------------------------------------------------------------------------
+# Story 2.6：关键词搜索。本段自包含追加，不改动上方既有测试类与既有 151 例。
+# ---------------------------------------------------------------------------
+import os
+import shutil
+import tempfile
+import time
+from datetime import timedelta
+from decimal import Decimal
+from io import BytesIO
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
+from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
+from django.utils import timezone
+from PIL import Image as PILImage
+
+from accounts.models import User
+from listings.models import Product, ProductImage, RejectionNotice
+
+_STORY26_MEDIA_ROOT = tempfile.mkdtemp(prefix='story26-media-')
+
+
+def _story26_image(name='photo.jpg', fmt='JPEG'):
+    """生成一张 Pillow 真实 JPEG/PNG 内存图片，供 2.6 测试图片夹具使用。"""
+    buf = BytesIO()
+    PILImage.new('RGB', (8, 8), (200, 30, 30)).save(buf, format=fmt)
+    content_type = 'image/jpeg' if fmt == 'JPEG' else 'image/png'
+    return SimpleUploadedFile(name, buf.getvalue(), content_type=content_type)
+
+
+@override_settings(MEDIA_ROOT=_STORY26_MEDIA_ROOT)
+class ProductSearchViewTests(TestCase):
+    """覆盖 spec-2-6 I/O 矩阵与 8 条 AC：标题 / 描述命中、大小写不敏感与整串不拆词、
+    四态混合仅 approved、非上架不泄露、卡片四要素与倒序、结果数 / 清空搜索 / 无结果
+    中文提示、搜索词转义与 % _ 字面量、首尾空白与空关键词退回全量、无 q 参数回归 2.5、
+    查询数不随 N 增长、单次 GET < 1s、三类访问门控、只读 405 且无写入、共享表面回归。"""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_STORY26_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        shutil.rmtree(_STORY26_MEDIA_ROOT, ignore_errors=True)
+        os.makedirs(_STORY26_MEDIA_ROOT, exist_ok=True)
+        self.owner = User.objects.create_user(
+            student_id='20262601', username='卖家甲26', password='testpass12345'
+        )
+        self.other = User.objects.create_user(
+            student_id='20262602', username='卖家乙26', password='testpass12345'
+        )
+        self.url = reverse('product_list')
+
+    # ---------- helpers ----------
+    def _make_product(self, title, description=None, status='approved', owner=None,
+                      price=Decimal('25.00'), condition='良好', category='教材'):
+        return Product.objects.create(
+            owner=owner or self.owner,
+            title=title,
+            description=description if description is not None else ('描述文本-%s' % title),
+            price=price,
+            condition=condition,
+            category=category,
+            status=status,
+        )
+
+    def _attach_images(self, product, count=1, prefix='img26'):
+        for i in range(count):
+            ProductImage.objects.create(
+                product=product, image=_story26_image(f'{prefix}_{i}.jpg')
+            )
+
+    def _set_created_at(self, product, when):
+        Product.objects.filter(pk=product.pk).update(created_at=when)
+        product.refresh_from_db()
+        return product
+
+    def _snapshot(self):
+        return list(
+            Product.objects.values(
+                'pk', 'owner_id', 'title', 'description', 'price', 'condition',
+                'category', 'status', 'created_at', 'updated_at',
+            ).order_by('pk')
+        )
+
+    def _media_snapshot(self):
+        result = []
+        for root, dirs, files in os.walk(_STORY26_MEDIA_ROOT):
+            for name in files:
+                result.append(
+                    os.path.relpath(os.path.join(root, name), _STORY26_MEDIA_ROOT)
+                )
+        return sorted(result)
+
+    def _get(self, q=None):
+        if q is None:
+            return self.client.get(self.url)
+        return self.client.get(self.url, {'q': q})
+
+    def _count_queries_for_get(self, q=None):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._get(q)
+        self.assertEqual(resp.status_code, 200)
+        return len(ctx)
+
+    # ---------- 标题 / 描述命中（FR-10）----------
+    def test_title_match_only(self):
+        hit = self._make_product('Python 教材 26', description='完全没有关键词的描述')
+        self._make_product('高等数学 26', description='另一段描述')
+        resp = self._get('Python')
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.context['products']), [hit])
+        self.assertContains(resp, 'Python 教材 26')
+        self.assertNotContains(resp, '高等数学 26')
+
+    def test_description_match_only(self):
+        hit = self._make_product('大学物理 26', description='这本 Python 入门书很好')
+        self._make_product('线性代数 26', description='与关键词无关')
+        resp = self._get('Python')
+        self.assertEqual(list(resp.context['products']), [hit])
+        self.assertContains(resp, '大学物理 26')
+        self.assertNotContains(resp, '线性代数 26')
+        # 描述命中时卡片仍为四要素
+        self.assertContains(resp, '¥25.00')
+        self.assertContains(resp, hit.get_condition_display())
+
+    # ---------- 大小写不敏感 + 整串不拆词 ----------
+    def test_case_insensitive_single_substring(self):
+        hit = self._make_product('Python 教材进阶 26', description='无关描述')
+        for q in ('Python', 'python', 'PYTHON', 'pYtHoN'):
+            with self.subTest(q=q):
+                resp = self._get(q)
+                self.assertEqual(list(resp.context['products']), [hit])
+
+    def test_whole_string_no_tokenization(self):
+        only_gaoshu = self._make_product('高数 26', description='教材之外')
+        exact = self._make_product('高数 教材 上册 26', description='无关')
+        self._make_product('完全无关 26', description='无关')
+        resp = self._get('高数 教材')
+        # 「高数 教材」按整串匹配；仅含「高数」的商品不出现
+        self.assertEqual(list(resp.context['products']), [exact])
+        self.assertNotContains(resp, '高数 26')
+        self.assertNotContains(resp, only_gaoshu.title)
+        self.assertContains(resp, '高数 教材 上册 26')
+
+    # ---------- 双字段与四态混合：仅「命中且 approved」（AC-1）----------
+    def test_four_status_mixed_only_approved_and_keyword(self):
+        kw = 'Python'
+        rows = (
+            ('Python 待审书26', '包含 Python 的描述', 'pending'),
+            ('Python 上架书26', '包含 Python 的描述', 'approved'),
+            ('Python 驳回书26', '包含 Python 的描述', 'rejected'),
+            ('Python 下架书26', '包含 Python 的描述', 'offline'),
+            ('无关标题26', '这本 Python 书', 'approved'),
+            ('高数书26', '与关键词无关', 'approved'),
+            ('无关待审26', '与关键词无关', 'pending'),
+        )
+        for title, description, status in rows:
+            self._make_product(title, description=description, status=status)
+        resp = self._get(kw)
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual(
+            {p.title for p in results}, {'Python 上架书26', '无关标题26'}
+        )
+        self.assertTrue(all(p.status == 'approved' for p in results))
+        self.assertTrue(all(kw in (p.title + p.description) for p in results))
+        self.assertEqual(resp.context['search_query'], kw)
+        self.assertTrue(resp.context['search_active'])
+        self.assertEqual(resp.context['result_count'], 2)
+        for title in (
+            'Python 待审书26', 'Python 驳回书26', 'Python 下架书26',
+            '高数书26', '无关待审26',
+        ):
+            self.assertNotContains(resp, title)
+        self.assertNotContains(resp, '包含 Python 的描述')
+        self.assertNotContains(resp, '这本 Python 书')
+
+    # ---------- 非上架不泄露 ----------
+    def test_non_approved_products_not_leaked(self):
+        kw = '绝密关键词26'
+        leaked = []
+        for label, status in (
+            ('待审', 'pending'), ('驳回', 'rejected'), ('下架', 'offline'),
+        ):
+            p = self._make_product(
+                f'{label}{kw}', description=f'描述也含{kw}', status=status,
+                price=Decimal('99.99'),
+            )
+            self._attach_images(p, count=1, prefix=f'leak_{status}')
+            leaked.append(p)
+        resp = self._get(kw)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.context['products']), [])
+        self.assertEqual(resp.context['result_count'], 0)
+        self.assertContains(resp, '没有找到与「%s」相关的商品' % kw)
+        self.assertNotContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, 'card h-100')
+        self.assertNotContains(resp, '<img')
+        for p in leaked:
+            self.assertNotContains(resp, p.title)
+            self.assertNotContains(resp, p.description)
+            self.assertNotContains(resp, '99.99')
+            for image in p.images.all():
+                self.assertNotContains(resp, image.image.url)
+        self.assertEqual(Product.objects.visible().count(), 0)
+
+    # ---------- 卡片四要素 + 首图 + 倒序（AC-2）----------
+    def test_card_four_elements_first_image_and_ordering(self):
+        now = timezone.now()
+        p1 = self._make_product(
+            'Python 旧26', description='含 Python', price=Decimal('10.00'),
+            condition='全新',
+        )
+        self._attach_images(p1, count=3, prefix='search_old')
+        p2 = self._make_product(
+            'Python 中26', description='含 Python', price=Decimal('20.00'),
+            condition='中等',
+        )
+        p3 = self._make_product(
+            'Python 新26', description='含 Python', price=Decimal('30.00'),
+            condition='良好',
+        )
+        self._attach_images(p3, count=1, prefix='search_new')
+        self._set_created_at(p1, now - timedelta(days=3))
+        self._set_created_at(p2, now - timedelta(days=2))
+        self._set_created_at(p3, now - timedelta(days=1))
+        self._make_product('Python 不命中态26', description='不含', status='pending')
+        resp = self._get('Python')
+        results = list(resp.context['products'])
+        self.assertEqual([p.pk for p in results], [p3.pk, p2.pk, p1.pk])
+        self.assertFalse(resp.context['products_empty'])
+        # 每张卡片只输出 1 个 <img>：p3 / p1 各 1 张，p2 无图
+        self.assertContains(resp, '<img', count=2)
+        self.assertContains(resp, '暂无图片')
+        self.assertContains(resp, '¥10.00')
+        self.assertContains(resp, '¥20.00')
+        self.assertContains(resp, '¥30.00')
+        self.assertContains(resp, '全新')
+        self.assertContains(resp, '良好')
+        self.assertContains(resp, '中等')
+        images = list(p1.images.all())
+        first_url = images[0].image.url
+        self.assertContains(resp, 'src="%s"' % first_url)
+        for image in images[1:]:
+            self.assertNotContains(resp, image.image.url)
+        html = resp.content.decode()
+        positions = [
+            html.index(t) for t in ('Python 新26', 'Python 中26', 'Python 旧26')
+        ]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotContains(resp, 'Python 不命中态26')
+
+    # ---------- 结果语境：找到 N 件 / 清空搜索 / 回显（AC-3）----------
+    def test_result_context_found_n_clear_link_and_echo(self):
+        kw = 'Python'
+        for i in range(3):
+            self._make_product(f'Python 书{i}26', description='含 Python')
+        self._make_product('高数书26', description='不含')
+        resp = self._get(kw)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['search_query'], kw)
+        self.assertTrue(resp.context['search_active'])
+        self.assertEqual(resp.context['result_count'], 3)
+        self.assertContains(resp, '找到 3 件商品')
+        self.assertContains(resp, '<a href="%s">清空搜索</a>' % self.url)
+        self.assertContains(resp, '<form method="get"')
+        self.assertContains(resp, 'name="q"')
+        self.assertContains(resp, '搜索</button>')
+        self.assertContains(resp, 'value="%s"' % kw)
+        self.assertNotContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, '没有找到')
+
+    def test_no_match_with_existing_approved_products(self):
+        self._make_product('高等数学 26', description='不含关键词')
+        self._make_product('大学物理 26', description='不含关键词', status='pending')
+        resp = self._get('不存在的词XYZ')
+        self.assertEqual(list(resp.context['products']), [])
+        self.assertEqual(resp.context['result_count'], 0)
+        self.assertContains(resp, '没有找到与「不存在的词XYZ」相关的商品')
+        self.assertNotContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, '高等数学 26')
+        self.assertNotContains(resp, '大学物理 26')
+        self.assertNotContains(resp, 'card h-100')
+        self.assertNotContains(resp, '<img')
+        self.assertContains(resp, '找到 0 件商品')
+
+    # ---------- 搜索框回显与转义 ----------
+    def test_search_query_is_html_escaped(self):
+        kw = '<script>alert(1)</script>'
+        self._make_product('正常商品26', description='正常')
+        resp = self._get(kw)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['search_query'], kw)
+        self.assertNotContains(resp, '<script>alert(1)</script>')
+        self.assertNotContains(resp, '<script>')
+        self.assertContains(
+            resp, 'value="&lt;script&gt;alert(1)&lt;/script&gt;"'
+        )
+        self.assertContains(resp, '没有找到与「&lt;script&gt;alert(1)&lt;/script&gt;」相关的商品')
+
+    def test_percent_underscore_are_literal_not_wildcards(self):
+        hit = self._make_product('100%_优惠券26', description='正常')
+        self._make_product('100XYZ优惠券26', description='正常')
+        for q in ('%_', '%', '_'):
+            with self.subTest(q=q):
+                resp = self._get(q)
+                self.assertEqual(list(resp.context['products']), [hit])
+                self.assertNotContains(resp, '100XYZ优惠券26')
+        self.assertContains(self._get('%_'), 'value="%_"')
+
+    # ---------- 首尾空白 / 空关键词 / 无 q 参数（AC-4）----------
+    def test_strip_leading_trailing_whitespace(self):
+        hit = self._make_product('教材 高数26', description='无关')
+        self._make_product('无关26', description='无关')
+        resp = self._get('  教材  ')
+        self.assertEqual(resp.context['search_query'], '教材')
+        self.assertTrue(resp.context['search_active'])
+        self.assertEqual(list(resp.context['products']), [hit])
+        self.assertContains(resp, 'value="教材"')
+        self.assertNotContains(resp, 'value="  教材  "')
+        self.assertContains(resp, '找到 1 件商品')
+
+    def test_empty_or_blank_query_returns_full_list(self):
+        a = self._make_product('上架甲26', description='无关')
+        b = self._make_product('上架乙26', description='无关')
+        self._make_product('待审26', description='无关', status='pending')
+        for q in ('', '   ', '\t\n '):
+            with self.subTest(q=repr(q)):
+                resp = self._get(q)
+                self.assertEqual(resp.context['search_query'], '')
+                self.assertFalse(resp.context['search_active'])
+                self.assertEqual(resp.context['result_count'], 2)
+                self.assertEqual(
+                    [p.pk for p in resp.context['products']], [b.pk, a.pk]
+                )
+                self.assertNotContains(resp, '件商品')
+                self.assertNotContains(resp, '清空搜索')
+                self.assertNotContains(resp, '没有找到')
+                self.assertContains(resp, '上架甲26')
+                self.assertContains(resp, '上架乙26')
+                self.assertNotContains(resp, '待审26')
+
+    def test_blank_query_empty_state_is_default_chinese(self):
+        self._make_product('仅有待审26', description='无关', status='pending')
+        resp = self._get('   ')
+        self.assertTrue(resp.context['products_empty'])
+        self.assertEqual(list(resp.context['products']), [])
+        self.assertFalse(resp.context['search_active'])
+        self.assertContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, '没有找到')
+        self.assertNotContains(resp, '清空搜索')
+
+    def test_no_q_param_matches_2_5_behavior(self):
+        a = self._make_product('上架甲26', description='无关')
+        b = self._make_product('上架乙26', description='无关')
+        self._make_product('待审26', description='无关', status='pending')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['search_query'], '')
+        self.assertFalse(resp.context['search_active'])
+        self.assertEqual(resp.context['result_count'], 2)
+        self.assertEqual(
+            [p.pk for p in resp.context['products']], [b.pk, a.pk]
+        )
+        self.assertContains(resp, '上架甲26')
+        self.assertContains(resp, '上架乙26')
+        self.assertNotContains(resp, '待审26')
+        self.assertNotContains(resp, '件商品')
+        self.assertNotContains(resp, '清空搜索')
+        self.assertNotContains(resp, '没有找到')
+        # 搜索表单仍在（纯追加），但无结果语境
+        self.assertContains(resp, '<form method="get"')
+        self.assertContains(resp, 'name="q"')
+        # 完全空库仍为 2.5 的「暂无上架商品」硬断言
+        Product.objects.all().delete()
+        resp2 = self.client.get(self.url)
+        self.assertTrue(resp2.context['products_empty'])
+        self.assertContains(resp2, '暂无上架商品')
+        self.assertNotContains(resp2, '没有找到')
+        self.assertNotContains(resp2, 'card h-100')
+
+    def test_context_variables(self):
+        self._make_product('Python 书26', description='含 Python')
+        resp = self._get('  Python  ')
+        self.assertEqual(resp.context['search_query'], 'Python')
+        self.assertTrue(resp.context['search_active'])
+        self.assertEqual(resp.context['result_count'], 1)
+        self.assertFalse(resp.context['products_empty'])
+        no_q = self.client.get(self.url)
+        self.assertEqual(no_q.context['search_query'], '')
+        self.assertFalse(no_q.context['search_active'])
+        self.assertEqual(no_q.context['result_count'], 1)
+
+    # ---------- NFR-1：查询数不随 N 增长 + 单次 GET < 1s（AC-6）----------
+    def test_query_count_does_not_grow_with_n(self):
+        for i in range(2):
+            product = self._make_product(
+                f'查询数商品{i}26', description='含 Python'
+            )
+            self._attach_images(product, count=1, prefix=f'q2_{i}')
+        q_small = self._count_queries_for_get('Python')
+        for i in range(18):
+            product = self._make_product(
+                f'查询数大商品{i}26', description='含 Python'
+            )
+            self._attach_images(product, count=1, prefix=f'q20_{i}')
+        q_large = self._count_queries_for_get('Python')
+        self.assertEqual(q_small, q_large)
+        self.assertLessEqual(q_large, 5)
+
+    def test_single_get_under_one_second(self):
+        for i in range(20):
+            product = self._make_product(
+                f'性能商品{i}26', description='含 Python'
+            )
+            self._attach_images(product, count=1, prefix=f'perf_{i}')
+        start = time.perf_counter()
+        resp = self._get('Python')
+        elapsed = time.perf_counter() - start
+        self.assertEqual(resp.status_code, 200)
+        self.assertLess(elapsed, 1.0)
+
+    # ---------- 三类访问门控（AC-7）----------
+    def test_three_user_states_with_keyword_all_200(self):
+        hit = self._make_product('Python 公开26', description='含 Python')
+        for label, status in (
+            ('待审', 'pending'), ('驳回', 'rejected'), ('下架', 'offline'),
+        ):
+            self._make_product(
+                f'Python {label}26', description='含 Python', status=status
+            )
+        cases = [('匿名', self._get('Python'))]
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        self.client.force_login(self.owner)
+        cases.append(('已登录已认证', self._get('Python')))
+        self.owner.is_verified = False
+        self.owner.save(update_fields=['is_verified'])
+        cases.append(('已登录未认证', self._get('Python')))
+        for label, resp in cases:
+            with self.subTest(label=label):
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(list(resp.context['products']), [hit])
+                self.assertContains(resp, 'Python 公开26')
+                for s in ('待审', '驳回', '下架'):
+                    self.assertNotContains(resp, f'Python {s}26')
+
+    # ---------- 只读：405 / 无写入（AC-7）----------
+    def test_unsafe_methods_with_keyword_return_405_without_writes(self):
+        product = self._make_product('Python 上架26', description='含 Python')
+        self._attach_images(product, count=1, prefix='ro')
+        before = self._snapshot()
+        before_media = self._media_snapshot()
+        before_images = list(ProductImage.objects.values('pk', 'product_id', 'image'))
+        for method in (
+            self.client.post, self.client.put, self.client.patch, self.client.delete,
+        ):
+            resp = method(self.url + '?q=Python', {'title': 'hacked'})
+            self.assertEqual(resp.status_code, 405, msg=method)
+            self.assertEqual(resp['Allow'], 'GET, HEAD')
+        self.assertEqual(self.client.head(self.url).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(
+            list(ProductImage.objects.values('pk', 'product_id', 'image')),
+            before_images,
+        )
+        self.assertEqual(self._media_snapshot(), before_media)
+        self.assertEqual(RejectionNotice.objects.count(), 0)
+
+    def test_get_with_keyword_is_read_only(self):
+        self._make_product('Python 上架26', description='含 Python')
+        before = self._snapshot()
+        before_media = self._media_snapshot()
+        self.assertEqual(self._get('Python').status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(self._media_snapshot(), before_media)
+
+    # ---------- 共享表面回归：搜索框仅存在于列表页（AC-5）----------
+    def test_search_form_only_on_product_list_page(self):
+        home = self.client.get(reverse('home'))
+        self.assertNotContains(home, 'name="q"')
+        self.assertNotContains(home, '清空搜索')
+        self.assertNotContains(home, '>搜索</button>')
+        self.assertContains(home, 'href="%s"' % self.url, count=2)
+        self.assertContains(home, '商品浏览')
+        listing = self.client.get(self.url)
+        self.assertContains(listing, 'name="q"')
+        self.assertContains(listing, '<form method="get"')
+        self.assertContains(listing, '>搜索</button>')

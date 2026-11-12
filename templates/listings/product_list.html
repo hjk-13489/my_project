@@ -25,6 +25,25 @@
     </div>
 </div>
 
+<form method="get" action="{% url 'product_list' %}" class="row g-2 justify-content-center mb-3">
+    <div class="col-auto">
+        <input type="text" name="q" value="{{ search_query }}" class="form-control" placeholder="输入关键词搜索" aria-label="搜索关键词">
+    </div>
+    <div class="col-auto">
+        <button type="submit" class="btn btn-primary">搜索</button>
+    </div>
+</form>
+
+{% if search_active %}
+    <div class="text-center mb-3">
+        <span class="text-muted me-2">找到 {{ result_count }} 件商品</span>
+        <a href="{% url 'product_list' %}">清空搜索</a>
+    </div>
+{% endif %}
+
+{% if search_active and not result_count %}
+    <p class="text-center mb-0">没有找到与「{{ search_query }}」相关的商品</p>
+{% else %}
 {% if products_empty %}
     <p class="text-muted text-center mb-0">暂无上架商品</p>
 {% else %}
@@ -48,5 +67,6 @@
             </div>
         {% endfor %}
     </div>
+{% endif %}
 {% endif %}
 {% endblock %}
