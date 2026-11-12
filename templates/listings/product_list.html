@@ -34,6 +34,35 @@
     </div>
 </form>
 
+<form method="get" action="{% url 'product_list' %}" class="row g-2 justify-content-center mb-3">
+    <input type="hidden" name="q" value="{{ search_query }}">
+    <div class="col-auto">
+        <select name="category" class="form-select" aria-label="分类筛选">
+            <option value="">全部分类</option>
+            {% for value, label in category_choices %}
+                <option value="{{ value }}" {% if filter_category == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-auto">
+        <select name="condition" class="form-select" aria-label="成色筛选">
+            <option value="">全部成色</option>
+            {% for value, label in condition_choices %}
+                <option value="{{ value }}" {% if filter_condition == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-auto">
+        <input type="number" name="min_price" value="{{ filter_min_price }}" class="form-control" placeholder="最低价" aria-label="最低价" min="0" step="0.01">
+    </div>
+    <div class="col-auto">
+        <input type="number" name="max_price" value="{{ filter_max_price }}" class="form-control" placeholder="最高价" aria-label="最高价" min="0" step="0.01">
+    </div>
+    <div class="col-auto">
+        <button type="submit" class="btn btn-outline-primary">筛选</button>
+    </div>
+</form>
+
 {% if search_active %}
     <div class="text-center mb-3">
         <span class="text-muted me-2">找到 {{ result_count }} 件商品</span>
@@ -41,6 +70,20 @@
     </div>
 {% endif %}
 
+{% if filter_active and not search_active %}
+    <div class="text-center mb-3">
+        <span class="text-muted me-2">找到 {{ result_count }} 件商品</span>
+    </div>
+{% endif %}
+{% if filter_active %}
+    <div class="text-center mb-3">
+        <a href="{{ clear_filter_url }}">清空筛选</a>
+    </div>
+{% endif %}
+
+{% if filter_active and not search_active and not result_count %}
+    <p class="text-center mb-0">没有符合筛选条件的商品</p>
+{% else %}
 {% if search_active and not result_count %}
     <p class="text-center mb-0">没有找到与「{{ search_query }}」相关的商品</p>
 {% else %}
@@ -67,6 +110,7 @@
             </div>
         {% endfor %}
     </div>
+{% endif %}
 {% endif %}
 {% endif %}
 {% endblock %}

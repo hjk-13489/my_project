@@ -1982,3 +1982,738 @@ class ProductSearchViewTests(TestCase):
         self.assertContains(listing, 'name="q"')
         self.assertContains(listing, '<form method="get"')
         self.assertContains(listing, '>搜索</button>')
+
+
+# ---------------------------------------------------------------------------
+# Story 2.7：分类 / 价格 / 成色组合筛选。本段自包含追加，不改动上方既有测试类与既有 173 例。
+# ---------------------------------------------------------------------------
+import os
+import re
+import shutil
+import tempfile
+import time
+from datetime import timedelta
+from decimal import Decimal
+from html import unescape
+from io import BytesIO
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
+from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
+from django.utils import timezone
+from django.utils.http import urlencode
+from PIL import Image as PILImage
+
+from accounts.models import User
+from listings.models import Product, ProductImage, RejectionNotice
+
+_STORY27_MEDIA_ROOT = tempfile.mkdtemp(prefix='story27-media-')
+
+
+def _story27_image(name='photo.jpg', fmt='JPEG'):
+    """生成一张 Pillow 真实 JPEG/PNG 内存图片，供 2.7 测试图片夹具使用。"""
+    buf = BytesIO()
+    PILImage.new('RGB', (8, 8), (200, 30, 30)).save(buf, format=fmt)
+    content_type = 'image/jpeg' if fmt == 'JPEG' else 'image/png'
+    return SimpleUploadedFile(name, buf.getvalue(), content_type=content_type)
+
+
+@override_settings(MEDIA_ROOT=_STORY27_MEDIA_ROOT)
+class ProductFilterViewTests(TestCase):
+    """覆盖 spec-2-7 I/O 矩阵与 9 条 AC：单条件 / 半区间 / 三条件 AND 组合 / 与 q
+    叠加且不丢词、四态混合仅 approved、非上架不泄露、卡片四要素与倒序、非法枚举与
+    非数字与负价与倒置区间、空串与首尾空白、无参数与仅 q 回归 2.5–2.6、结果语境与
+    回显与清空筛选、筛选态无结果提示、转义、查询数不随 N 增长、单次 GET < 1s、
+    三类访问门控、只读 405 且无写入、共享表面回归。"""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_STORY27_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        shutil.rmtree(_STORY27_MEDIA_ROOT, ignore_errors=True)
+        os.makedirs(_STORY27_MEDIA_ROOT, exist_ok=True)
+        self.owner = User.objects.create_user(
+            student_id='20272701', username='卖家甲27', password='testpass12345'
+        )
+        self.other = User.objects.create_user(
+            student_id='20272702', username='卖家乙27', password='testpass12345'
+        )
+        self.url = reverse('product_list')
+
+    # ---------- helpers ----------
+    def _make_product(self, title, description=None, status='approved', owner=None,
+                      price=Decimal('25.00'), condition='良好', category='教材'):
+        return Product.objects.create(
+            owner=owner or self.owner,
+            title=title,
+            description=description if description is not None else ('描述文本-%s' % title),
+            price=price,
+            condition=condition,
+            category=category,
+            status=status,
+        )
+
+    def _attach_images(self, product, count=1, prefix='img27'):
+        for i in range(count):
+            ProductImage.objects.create(
+                product=product, image=_story27_image(f'{prefix}_{i}.jpg')
+            )
+
+    def _set_created_at(self, product, when):
+        Product.objects.filter(pk=product.pk).update(created_at=when)
+        product.refresh_from_db()
+        return product
+
+    def _snapshot(self):
+        return list(
+            Product.objects.values(
+                'pk', 'owner_id', 'title', 'description', 'price', 'condition',
+                'category', 'status', 'created_at', 'updated_at',
+            ).order_by('pk')
+        )
+
+    def _media_snapshot(self):
+        result = []
+        for root, dirs, files in os.walk(_STORY27_MEDIA_ROOT):
+            for name in files:
+                result.append(
+                    os.path.relpath(os.path.join(root, name), _STORY27_MEDIA_ROOT)
+                )
+        return sorted(result)
+
+    def _get(self, params=None):
+        return self.client.get(self.url, params or {})
+
+    def _count_queries_for_get(self, params=None):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._get(params)
+        self.assertEqual(resp.status_code, 200)
+        return len(ctx)
+
+    # ---------- 单条件：分类 / 成色（I/O 矩阵）----------
+    def test_single_category_filter(self):
+        hit = self._make_product('教材命中27', category='教材')
+        self._make_product('日用品商品27', category='日用品')
+        self._make_product('电子数码商品27', category='电子数码')
+        resp = self._get({'category': '教材'})
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual(results, [hit])
+        self.assertTrue(all(
+            p.category == '教材' and p.status == 'approved' for p in results
+        ))
+        self.assertTrue(resp.context['filter_active'])
+        self.assertEqual(resp.context['result_count'], 1)
+        self.assertContains(resp, '教材命中27')
+        self.assertNotContains(resp, '日用品商品27')
+        self.assertNotContains(resp, '电子数码商品27')
+
+    def test_single_condition_filter(self):
+        hit = self._make_product('全新商品27', condition='全新')
+        self._make_product('良好商品27', condition='良好')
+        self._make_product('中等商品27', condition='中等')
+        resp = self._get({'condition': '全新'})
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual(results, [hit])
+        self.assertTrue(all(
+            p.condition == '全新' and p.status == 'approved' for p in results
+        ))
+        self.assertNotContains(resp, '良好商品27')
+        self.assertNotContains(resp, '中等商品27')
+
+    # ---------- 价格闭区间（含端点）与半区间 ----------
+    def test_price_closed_interval_includes_both_boundaries(self):
+        lo = self._make_product('价格10边界27', price=Decimal('10.00'))
+        mid = self._make_product('价格50中间27', price=Decimal('50.00'))
+        hi = self._make_product('价格100边界27', price=Decimal('100.00'))
+        self._make_product('价格9低于27', price=Decimal('9.99'))
+        self._make_product('价格101高于27', price=Decimal('100.01'))
+        resp = self._get({'min_price': '10', 'max_price': '100'})
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual({p.pk for p in results}, {lo.pk, mid.pk, hi.pk})
+        self.assertTrue(all(
+            Decimal('10') <= p.price <= Decimal('100') for p in results
+        ))
+        self.assertNotContains(resp, '价格9低于27')
+        self.assertNotContains(resp, '价格101高于27')
+
+    def test_only_one_price_bound(self):
+        cheap = self._make_product('低价27', price=Decimal('5.00'))
+        mid = self._make_product('中价27', price=Decimal('50.00'))
+        expensive = self._make_product('高价27', price=Decimal('500.00'))
+        resp_min = self._get({'min_price': '10'})
+        self.assertEqual(resp_min.status_code, 200)
+        self.assertEqual(
+            {p.pk for p in resp_min.context['products']}, {mid.pk, expensive.pk}
+        )
+        resp_max = self._get({'max_price': '100'})
+        self.assertEqual(resp_max.status_code, 200)
+        self.assertEqual(
+            {p.pk for p in resp_max.context['products']}, {cheap.pk, mid.pk}
+        )
+
+    # ---------- 三条件 AND 组合（AC-1）----------
+    def test_three_conditions_and_combination(self):
+        category, condition = '教材', '全新'
+        lo, hi = Decimal('10'), Decimal('100')
+        hit = self._make_product(
+            '组合命中27', category=category, condition=condition,
+            price=Decimal('50.00'),
+        )
+        # 各只差一个条件
+        self._make_product('差分类27', category='日用品', condition=condition,
+                           price=Decimal('50.00'))
+        self._make_product('差成色27', category=category, condition='良好',
+                           price=Decimal('50.00'))
+        self._make_product('差低价27', category=category, condition=condition,
+                           price=Decimal('9.99'))
+        self._make_product('差高价27', category=category, condition=condition,
+                           price=Decimal('100.01'))
+        resp = self._get({
+            'category': category, 'condition': condition,
+            'min_price': '10', 'max_price': '100',
+        })
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual(results, [hit])
+        self.assertTrue(all(
+            p.category == category and lo <= p.price <= hi
+            and p.condition == condition for p in results
+        ))
+        self.assertTrue(all(p.status == 'approved' for p in results))
+
+    # ---------- q 与筛选全量 AND 叠加、筛选表单保留 q（AC-4）----------
+    def test_keyword_and_filters_on_same_queryset(self):
+        hit = self._make_product(
+            'Python 教材27', description='含 Python', category='教材',
+            condition='全新', price=Decimal('50.00'),
+        )
+        self._make_product('Python 日用品27', description='含 Python',
+                           category='日用品', condition='全新', price=Decimal('50.00'))
+        self._make_product('高数 教材27', description='不含关键词',
+                           category='教材', condition='全新', price=Decimal('50.00'))
+        params = {
+            'q': 'Python', 'category': '教材', 'condition': '全新',
+            'min_price': '10', 'max_price': '100',
+        }
+        resp = self._get(params)
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual(results, [hit])
+        self.assertTrue(all(p.status == 'approved' for p in results))
+        self.assertTrue(all('Python' in (p.title + p.description) for p in results))
+        self.assertEqual(resp.context['search_query'], 'Python')
+        self.assertTrue(resp.context['search_active'])
+        self.assertTrue(resp.context['filter_active'])
+        self.assertEqual(resp.context['result_count'], 1)
+        # 筛选表单以隐藏域保留 q，提交筛选后搜索词不丢失
+        self.assertContains(resp, '<input type="hidden" name="q" value="Python">')
+        resubmitted = self._get(params)
+        self.assertEqual(resubmitted.context['search_query'], 'Python')
+        self.assertEqual(resubmitted.context['result_count'], 1)
+        # 清空筛选保留 q；2.6 搜索态节点与文案一字不改
+        self.assertContains(resp, '<a href="%s?q=Python">清空筛选</a>' % self.url)
+        self.assertContains(resp, '找到 1 件商品')
+        # 组合检索态：计数恰好出现一次（纯筛选态与搜索态分支互斥）
+        self.assertEqual(resp.content.decode().count('找到 1 件商品'), 1)
+        self.assertContains(resp, '<a href="%s">清空搜索</a>' % self.url)
+        self.assertNotContains(resp, '没有符合筛选条件的商品')
+
+    # ---------- 四态混合：仅「满足全部条件且 approved」（AC-1）----------
+    def test_four_status_mixed_only_approved(self):
+        hit = self._make_product(
+            '命中上架27', category='教材', condition='全新',
+            price=Decimal('50.00'), status='approved',
+        )
+        for label, status in (
+            ('待审', 'pending'), ('驳回', 'rejected'), ('下架', 'offline'),
+        ):
+            self._make_product(
+                f'命中{label}27', category='教材', condition='全新',
+                price=Decimal('50.00'), status=status,
+            )
+        self._make_product(
+            '上架不命中27', category='日用品', condition='全新',
+            price=Decimal('50.00'), status='approved',
+        )
+        resp = self._get({
+            'category': '教材', 'condition': '全新',
+            'min_price': '10', 'max_price': '100',
+        })
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual(results, [hit])
+        self.assertTrue(all(p.status == 'approved' for p in results))
+        self.assertEqual(Product.objects.visible().count(), 2)
+        for label in ('待审', '驳回', '下架'):
+            self.assertNotContains(resp, f'命中{label}27')
+
+    # ---------- 非上架不泄露（I/O 矩阵）----------
+    def test_non_approved_products_not_leaked(self):
+        leaked = []
+        for label, status in (
+            ('待审', 'pending'), ('驳回', 'rejected'), ('下架', 'offline'),
+        ):
+            product = self._make_product(
+                f'绝密{label}27', description=f'绝密描述{label}27',
+                category='教材', condition='全新', price=Decimal('50.00'),
+                status=status,
+            )
+            self._attach_images(product, count=1, prefix=f'leak27_{status}')
+            leaked.append(product)
+        resp = self._get({
+            'category': '教材', 'condition': '全新',
+            'min_price': '10', 'max_price': '100',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.context['products']), [])
+        self.assertEqual(resp.context['result_count'], 0)
+        self.assertTrue(resp.context['filter_active'])
+        self.assertContains(resp, '没有符合筛选条件的商品')
+        self.assertNotContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, 'card h-100')
+        self.assertNotContains(resp, '<img')
+        for product in leaked:
+            self.assertNotContains(resp, product.title)
+            self.assertNotContains(resp, product.description)
+            for image in product.images.all():
+                self.assertNotContains(resp, image.image.url)
+        self.assertEqual(Product.objects.visible().count(), 0)
+
+    # ---------- 卡片四要素 + 首图 + 倒序（AC-2 / 矩阵）----------
+    def test_card_four_elements_first_image_and_ordering(self):
+        now = timezone.now()
+        p1 = self._make_product('组合旧27', category='教材', condition='全新',
+                                price=Decimal('10.00'))
+        self._attach_images(p1, count=3, prefix='f_old')
+        p2 = self._make_product('组合中27', category='教材', condition='全新',
+                                price=Decimal('20.00'))
+        p3 = self._make_product('组合新27', category='教材', condition='中等',
+                                price=Decimal('30.00'))
+        self._attach_images(p3, count=1, prefix='f_new')
+        self._set_created_at(p1, now - timedelta(days=3))
+        self._set_created_at(p2, now - timedelta(days=2))
+        self._set_created_at(p3, now - timedelta(days=1))
+        self._make_product('组合不命中态27', category='教材', condition='全新',
+                           price=Decimal('50.00'), status='pending')
+        resp = self._get({'category': '教材', 'min_price': '10', 'max_price': '100'})
+        self.assertEqual(resp.status_code, 200)
+        results = list(resp.context['products'])
+        self.assertEqual([p.pk for p in results], [p3.pk, p2.pk, p1.pk])
+        self.assertFalse(resp.context['products_empty'])
+        self.assertContains(resp, '<img', count=2)
+        self.assertContains(resp, '暂无图片')
+        self.assertContains(resp, '¥10.00')
+        self.assertContains(resp, '¥20.00')
+        self.assertContains(resp, '¥30.00')
+        self.assertContains(resp, '全新')
+        self.assertContains(resp, '中等')
+        images = list(p1.images.all())
+        self.assertContains(resp, 'src="%s"' % images[0].image.url)
+        for image in images[1:]:
+            self.assertNotContains(resp, image.image.url)
+        html = resp.content.decode()
+        positions = [html.index(t) for t in ('组合新27', '组合中27', '组合旧27')]
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotContains(resp, '组合不命中态27')
+
+    # ---------- 非法枚举：逐条静默忽略、其余有效条件照常 AND（AC-3）----------
+    def test_invalid_enum_values_silently_ignored(self):
+        hit = self._make_product('教材全新27', category='教材', condition='全新')
+        self._make_product('教材良好27', category='教材', condition='良好')
+        resp = self._get({'category': '不存在', 'condition': '全新'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.context['products']), [hit])
+        self.assertTrue(resp.context['filter_active'])
+        # 全非法 → 静默忽略后退回全量，与 2.5 一致
+        resp2 = self._get({'category': '不存在', 'condition': '九成新'})
+        self.assertEqual(resp2.status_code, 200)
+        self.assertFalse(resp2.context['filter_active'])
+        self.assertEqual(resp2.context['result_count'], 2)
+        self.assertNotContains(resp2, '清空筛选')
+        self.assertNotContains(resp2, '件商品')
+        self.assertNotContains(resp2, '没有符合筛选条件的商品')
+
+    # ---------- 非数字价格：静默忽略、不抛异常（AC-3）----------
+    def test_non_numeric_price_silently_ignored(self):
+        hit = self._make_product('教材50的27', category='教材', price=Decimal('50.00'))
+        self._make_product('日用品50的27', category='日用品', price=Decimal('50.00'))
+        for bad in ('abc', '乱码', '1.2.3', 'NaN', 'Infinity'):
+            with self.subTest(bad=bad):
+                resp = self._get({'category': '教材', 'min_price': bad,
+                                  'max_price': ''})
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(list(resp.context['products']), [hit])
+        resp2 = self._get({'min_price': 'abc', 'max_price': ''})
+        self.assertEqual(resp2.status_code, 200)
+        self.assertFalse(resp2.context['filter_active'])
+        self.assertEqual(resp2.context['result_count'], 2)
+
+    # ---------- 负价格 / 倒置区间：静默忽略、页面 200、不空集（AC-3）----------
+    def test_negative_and_inverted_price_silently_ignored(self):
+        a = self._make_product('教材10的27', category='教材', price=Decimal('10.00'))
+        b = self._make_product('教材200的27', category='教材', price=Decimal('200.00'))
+        all_approved = {a.pk, b.pk}
+        # 负价端单独出现：静默忽略，其余有效条件照常 AND 生效
+        r1 = self._get({'min_price': '-5', 'category': '教材'})
+        self.assertEqual(r1.status_code, 200)
+        self.assertEqual({p.pk for p in r1.context['products']}, all_approved)
+        self.assertTrue(r1.context['filter_active'])
+        # 负价一端 + 合法另一端：逐条独立校验，合法端仍生效
+        r2 = self._get({'min_price': '-5', 'max_price': '100'})
+        self.assertEqual(r2.status_code, 200)
+        self.assertEqual({p.pk for p in r2.context['products']}, {a.pk})
+        # 倒置区间：整对价格条件忽略，页面 200、不返回 400、不直接呈现空结果集
+        r3 = self._get({'min_price': '200', 'max_price': '10'})
+        self.assertEqual(r3.status_code, 200)
+        self.assertEqual({p.pk for p in r3.context['products']}, all_approved)
+        self.assertFalse(r3.context['filter_active'])
+        self.assertNotContains(r3, '没有符合筛选条件的商品')
+        # 倒置 + 有效分类同时存在：分类条件仍照常生效
+        r4 = self._get({'category': '教材', 'min_price': '200', 'max_price': '10'})
+        self.assertEqual(r4.status_code, 200)
+        self.assertEqual({p.pk for p in r4.context['products']}, all_approved)
+
+    # ---------- 空串与首尾空白：归一化「未提供」 ----------
+    def test_empty_and_whitespace_params_treated_as_not_provided(self):
+        hit = self._make_product('教材商品27', category='教材')
+        self._make_product('日用品商品27', category='日用品')
+        for params in (
+            {'category': '', 'condition': '', 'min_price': '', 'max_price': ''},
+            {'category': '  ', 'condition': '\t', 'min_price': '  ',
+             'max_price': '\n '},
+        ):
+            with self.subTest(params=params):
+                resp = self._get(params)
+                self.assertEqual(resp.status_code, 200)
+                self.assertFalse(resp.context['filter_active'])
+                self.assertEqual(resp.context['result_count'], 2)
+                self.assertNotContains(resp, '清空筛选')
+                self.assertNotContains(resp, '件商品')
+                self.assertContains(resp, '教材商品27')
+                self.assertContains(resp, '日用品商品27')
+
+    # ---------- 各种非法输入组合恒 200、不泄露、不消费其他参数 ----------
+    def test_various_invalid_inputs_never_raise_or_return_400(self):
+        self._make_product('正常商品27', category='教材', condition='全新',
+                           price=Decimal('50.00'))
+        bad_params = (
+            {'category': '不存在'},
+            {'condition': '九成新'},
+            {'min_price': 'abc'},
+            {'max_price': '12abc'},
+            {'min_price': '-5'},
+            {'max_price': '-1'},
+            {'min_price': '200', 'max_price': '10'},
+            {'min_price': 'NaN'},
+            {'min_price': 'Infinity'},
+            {'category': '', 'condition': '   ', 'min_price': '\t',
+             'max_price': '\n'},
+            {'category': '<script>alert(1)</script>', 'min_price': '10'},
+            {'sort': 'price', 'status': 'pending', 'page': '2'},
+        )
+        for params in bad_params:
+            with self.subTest(params=params):
+                resp = self._get(params)
+                self.assertEqual(resp.status_code, 200)
+                self.assertTrue(all(
+                    p.status == 'approved' for p in resp.context['products']
+                ))
+
+    # ---------- 无参数回归 2.5 / 2.6 ----------
+    def test_no_params_regression(self):
+        a = self._make_product('上架甲27')
+        b = self._make_product('上架乙27')
+        self._make_product('待审27', status='pending')
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['search_query'], '')
+        self.assertFalse(resp.context['search_active'])
+        self.assertFalse(resp.context['filter_active'])
+        self.assertEqual(resp.context['result_count'], 2)
+        self.assertEqual([p.pk for p in resp.context['products']], [b.pk, a.pk])
+        self.assertNotContains(resp, '件商品')
+        self.assertNotContains(resp, '清空搜索')
+        self.assertNotContains(resp, '清空筛选')
+        self.assertNotContains(resp, '没有符合筛选条件的商品')
+        self.assertContains(resp, '<form method="get"')
+        self.assertContains(resp, 'name="q"')
+        # 筛选表单纯追加：无筛选态也存在，且下拉含「全部」空选项
+        for name in ('category', 'condition', 'min_price', 'max_price'):
+            self.assertContains(resp, 'name="%s"' % name)
+        self.assertContains(resp, '<option value="">全部分类</option>')
+        self.assertContains(resp, '<option value="">全部成色</option>')
+        self.assertContains(resp, '筛选</button>')
+        # 完全空库仍为 2.5 的「暂无上架商品」硬断言
+        Product.objects.all().delete()
+        resp2 = self.client.get(self.url)
+        self.assertTrue(resp2.context['products_empty'])
+        self.assertContains(resp2, '暂无上架商品')
+        self.assertNotContains(resp2, '没有符合筛选条件的商品')
+
+    # ---------- 仅 q 回归：与 2.6 完全一致 ----------
+    def test_only_q_regression(self):
+        self._make_product('Python 上架27', description='含 Python')
+        self._make_product('高数上架27', description='不含')
+        resp = self._get({'q': 'Python'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['search_query'], 'Python')
+        self.assertTrue(resp.context['search_active'])
+        self.assertFalse(resp.context['filter_active'])
+        self.assertEqual(resp.context['result_count'], 1)
+        self.assertContains(resp, '找到 1 件商品')
+        self.assertContains(resp, '<a href="%s">清空搜索</a>' % self.url)
+        self.assertContains(resp, 'value="Python"')
+        self.assertNotContains(resp, '清空筛选')
+        self.assertNotContains(resp, '没有符合筛选条件的商品')
+        # 0 命中的搜索态沿用 2.6 文案，计数仍显示
+        resp2 = self._get({'q': '不存在XYZ'})
+        self.assertEqual(resp2.context['result_count'], 0)
+        self.assertContains(resp2, '找到 0 件商品')
+        self.assertContains(resp2, '没有找到与「不存在XYZ」相关的商品')
+        self.assertNotContains(resp2, '没有符合筛选条件的商品')
+        self.assertNotContains(resp2, '暂无上架商品')
+        self.assertNotContains(resp2, '清空筛选')
+
+    # ---------- 结果语境 / 回显 / 清空筛选（AC-3 / AC-4）----------
+    def test_result_context_echo_and_clear_filter_link(self):
+        for i in range(3):
+            self._make_product(
+                f'教材书{i}27', category='教材', condition='全新',
+                price=Decimal('50.00'),
+            )
+        self._make_product('日用品书27', category='日用品', condition='全新',
+                           price=Decimal('50.00'))
+        resp = self._get({
+            'category': '教材', 'condition': '全新',
+            'min_price': '10', 'max_price': '100',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['filter_active'])
+        self.assertEqual(resp.context['result_count'], 3)
+        self.assertContains(resp, '找到 3 件商品')
+        self.assertContains(resp, '<a href="%s">清空筛选</a>' % self.url)
+        # 任一检索态恰好看到一次计数
+        self.assertEqual(resp.content.decode().count('找到 3 件商品'), 1)
+        # 各控件回显归一化取值
+        self.assertContains(resp, 'value="教材" selected')
+        self.assertContains(resp, 'value="全新" selected')
+        self.assertContains(resp, 'value="10"')
+        self.assertContains(resp, 'value="100"')
+        self.assertNotContains(resp, '清空搜索')
+        self.assertNotContains(resp, '没有找到')
+
+    def test_filter_context_variables(self):
+        self._make_product('教材27', category='教材')
+        resp = self._get({
+            'category': ' 教材 ', 'min_price': ' 10 ', 'max_price': '100',
+        })
+        self.assertTrue(resp.context['filter_active'])
+        self.assertEqual(resp.context['filter_category'], '教材')
+        self.assertEqual(resp.context['filter_min_price'], '10')
+        self.assertEqual(resp.context['filter_max_price'], '100')
+        self.assertEqual(resp.context['result_count'], 1)
+        no_filter = self.client.get(self.url)
+        self.assertFalse(no_filter.context['filter_active'])
+        self.assertEqual(no_filter.context['filter_category'], '')
+
+    def test_clear_filter_link_keeps_q_and_clears_only_filter_params(self):
+        self._make_product('Python 教材27', description='含 Python', category='教材')
+        resp = self._get({'q': 'Python', 'category': '教材'})
+        self.assertContains(resp, '<a href="%s?q=Python">清空筛选</a>' % self.url)
+        # 点击「清空筛选」后回到仅 q 的搜索态
+        cleared = self._get({'q': 'Python'})
+        self.assertFalse(cleared.context['filter_active'])
+        self.assertTrue(cleared.context['search_active'])
+        self.assertEqual(cleared.context['result_count'], 1)
+        # 无 q 时指向 /listings/
+        resp2 = self._get({'category': '教材'})
+        self.assertContains(resp2, '<a href="%s">清空筛选</a>' % self.url)
+
+    def test_clear_filter_link_url_encodes_special_chars_in_q(self):
+        q = '教材 & 高数=100 # 上册'
+        self._make_product('组合检索27', description='含 %s' % q, category='教材')
+        resp = self._get({'q': q, 'category': '教材'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.context['search_active'])
+        self.assertTrue(resp.context['filter_active'])
+        # 解析渲染出的「清空筛选」href（HTML 属性需反转义）
+        html = resp.content.decode()
+        match = re.search(r'<a href="([^"]*)">清空筛选</a>', html)
+        self.assertIsNotNone(match)
+        href = unescape(match.group(1))
+        # 必须经 urlencode，含 & / # / = / 空格 / 中文的 q 不会被截断丢失
+        self.assertEqual(
+            href, reverse('product_list') + '?' + urlencode({'q': q})
+        )
+        # 实际 GET 该链接：q 原样保留，筛选已清空
+        cleared = self.client.get(href)
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.context['search_query'], q)
+        self.assertTrue(cleared.context['search_active'])
+        self.assertFalse(cleared.context['filter_active'])
+        self.assertEqual(cleared.context['result_count'], 1)
+
+    # ---------- 无匹配结果：纯筛选态 vs 搜索态（AC-3 / 矩阵）----------
+    def test_no_match_pure_filter_shows_filter_empty_message(self):
+        self._make_product('在售但不命中27', category='日用品', price=Decimal('50.00'))
+        # 库中另有未上架且恰好满足全部条件的商品
+        self._make_product('待审命中27', category='教材', condition='全新',
+                           price=Decimal('50.00'), status='pending')
+        resp = self._get({
+            'category': '教材', 'condition': '全新',
+            'min_price': '10', 'max_price': '100',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(list(resp.context['products']), [])
+        self.assertEqual(resp.context['result_count'], 0)
+        self.assertTrue(resp.context['filter_active'])
+        self.assertContains(resp, '找到 0 件商品')
+        self.assertContains(resp, '没有符合筛选条件的商品')
+        self.assertContains(resp, '清空筛选')
+        self.assertNotContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, 'card h-100')
+        self.assertNotContains(resp, '<img')
+        self.assertNotContains(resp, '待审命中27')
+        self.assertNotContains(resp, '在售但不命中27')
+
+    def test_no_match_with_search_active_uses_2_6_message(self):
+        self._make_product('无关在售27', category='日用品')
+        resp = self._get({'q': '不存在XYZ', 'category': '教材'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context['result_count'], 0)
+        self.assertTrue(resp.context['search_active'])
+        self.assertTrue(resp.context['filter_active'])
+        self.assertContains(resp, '找到 0 件商品')
+        # 组合检索态：计数恰好出现一次（纯筛选态与搜索态分支互斥）
+        self.assertEqual(resp.content.decode().count('找到 0 件商品'), 1)
+        self.assertContains(resp, '没有找到与「不存在XYZ」相关的商品')
+        self.assertContains(resp, '清空筛选')
+        self.assertNotContains(resp, '没有符合筛选条件的商品')
+        self.assertNotContains(resp, '暂无上架商品')
+        self.assertNotContains(resp, 'card h-100')
+
+    # ---------- 转义：回显 HTML 转义、% _ 字面量 ----------
+    def test_echo_is_html_escaped(self):
+        payload = '<script>alert(1)</script>'
+        self._make_product('正常商品27', description='含 %_')
+        resp = self._get({
+            'category': payload, 'min_price': payload, 'q': '%_',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, '<script>')
+        self.assertNotContains(resp, 'alert(1)</script>')
+        # 价格输入回显为 HTML 转义形式，页面不执行脚本
+        self.assertContains(
+            resp, 'value="&lt;script&gt;alert(1)&lt;/script&gt;"'
+        )
+        # q 回显；% / _ 被 ORM 当作字面量（命中含 %_ 的描述）
+        self.assertContains(resp, 'value="%_"')
+        self.assertContains(resp, '正常商品27')
+
+    # ---------- NFR-1：查询数不随 N 增长 + 单次 GET < 1s（AC-6）----------
+    def test_query_count_does_not_grow_with_n(self):
+        params = {'category': '教材', 'min_price': '10', 'max_price': '100'}
+        for i in range(2):
+            product = self._make_product(
+                f'查询数小{i}27', category='教材', price=Decimal('50.00')
+            )
+            self._attach_images(product, count=1, prefix=f'q2_{i}')
+        q_small = self._count_queries_for_get(params)
+        for i in range(18):
+            product = self._make_product(
+                f'查询数大{i}27', category='教材', price=Decimal('50.00')
+            )
+            self._attach_images(product, count=1, prefix=f'q20_{i}')
+        q_large = self._count_queries_for_get(params)
+        self.assertEqual(q_small, q_large)
+        self.assertLessEqual(q_large, 5)
+
+    def test_single_get_under_one_second(self):
+        for i in range(20):
+            product = self._make_product(
+                f'性能商品{i}27', category='教材', price=Decimal('50.00')
+            )
+            self._attach_images(product, count=1, prefix=f'perf_{i}')
+        params = {'category': '教材', 'min_price': '10', 'max_price': '100'}
+        start = time.perf_counter()
+        resp = self._get(params)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(resp.status_code, 200)
+        self.assertLess(elapsed, 1.0)
+
+    # ---------- 三类访问门控（AC-7）----------
+    def test_three_user_states_with_filters_all_200(self):
+        hit = self._make_product('公开教材27', category='教材')
+        for label, status in (
+            ('待审', 'pending'), ('驳回', 'rejected'), ('下架', 'offline'),
+        ):
+            self._make_product(f'隐藏{label}27', category='教材', status=status)
+        params = {'category': '教材', 'min_price': '10', 'max_price': '100'}
+        cases = [('匿名', self._get(params))]
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        self.client.force_login(self.owner)
+        cases.append(('已登录已认证', self._get(params)))
+        self.owner.is_verified = False
+        self.owner.save(update_fields=['is_verified'])
+        cases.append(('已登录未认证', self._get(params)))
+        for label, resp in cases:
+            with self.subTest(label=label):
+                self.assertEqual(resp.status_code, 200)
+                self.assertEqual(list(resp.context['products']), [hit])
+                self.assertContains(resp, '公开教材27')
+                for hidden in ('待审', '驳回', '下架'):
+                    self.assertNotContains(resp, f'隐藏{hidden}27')
+
+    # ---------- 只读：405 / 无 DB / media 写入（AC-7）----------
+    def test_unsafe_methods_with_filters_return_405_without_writes(self):
+        product = self._make_product('只读商品27', category='教材')
+        self._attach_images(product, count=1, prefix='ro27')
+        before = self._snapshot()
+        before_media = self._media_snapshot()
+        before_images = list(ProductImage.objects.values('pk', 'product_id', 'image'))
+        query = '?min_price=10&max_price=100'
+        for method in (
+            self.client.post, self.client.put, self.client.patch, self.client.delete,
+        ):
+            resp = method(self.url + query, {'title': 'hacked'})
+            self.assertEqual(resp.status_code, 405, msg=method)
+            self.assertEqual(resp['Allow'], 'GET, HEAD')
+        self.assertEqual(self.client.head(self.url, {'min_price': '10'}).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(
+            list(ProductImage.objects.values('pk', 'product_id', 'image')),
+            before_images,
+        )
+        self.assertEqual(self._media_snapshot(), before_media)
+        self.assertEqual(RejectionNotice.objects.count(), 0)
+
+    def test_get_with_filters_is_read_only(self):
+        self._make_product('只读商品27', category='教材')
+        before = self._snapshot()
+        before_media = self._media_snapshot()
+        self.assertEqual(self._get({'category': '教材'}).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(self._media_snapshot(), before_media)
+
+    # ---------- 共享表面回归：筛选 UI 仅存在于列表页 ----------
+    def test_filter_ui_only_on_product_list_page(self):
+        home = self.client.get(reverse('home'))
+        for text in (
+            'name="category"', 'name="condition"', 'name="min_price"',
+            'name="max_price"', '全部分类', '全部成色', '清空筛选', '筛选</button>',
+        ):
+            self.assertNotContains(home, text)
+        self.assertContains(home, 'href="%s"' % self.url, count=2)
+        self.assertContains(home, '商品浏览')
+        listing = self.client.get(self.url)
+        self.assertContains(listing, 'name="category"')
+        self.assertContains(listing, '全部分类')
+        self.assertContains(listing, '筛选</button>')

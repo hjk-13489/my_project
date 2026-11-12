@@ -1,7 +1,11 @@
+from decimal import Decimal, InvalidOperation
+
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404, render
+from django.urls import reverse
+from django.utils.http import urlencode
 from django.views.decorators.http import require_http_methods, require_safe
 
 from .forms import ProductForm, validate_images
@@ -114,28 +118,96 @@ def my_listings_view(request):
     })
 
 
+def _parse_nonnegative_price(raw):
+    """把价格字符串解析为非负有限 Decimal；空串 / 非数字 / 负数 / NaN / Inf 返回 None，静默忽略。
+
+    逐条独立校验：一个非法价格不牵连其他有效筛选条件。捕获 InvalidOperation / TypeError /
+    ValueError，不向页面抛 ValidationError / InvalidOperation。
+    """
+    if not raw:
+        return None
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not value.is_finite() or value < 0:
+        return None
+    return value
+
+
 # @require_safe 仅放行 GET/HEAD，其余方法 405（Allow: GET, HEAD）且不产生任何写入。
 # 买家侧公开只读页：不加 @login_required、不要求 is_verified，匿名 / 已登录均可见。
 # 对外可见性唯一门控是 Product.objects.visible()（models.py:12-14），此处直接链式复用，
-# 不另写 status 过滤、不写任何状态；唯一消费的请求参数是关键词 q（strip() 归一化后作
-# 整串单一子串、大小写不敏感的标题/描述包含匹配），其余参数一律忽略，为 2.7 组合筛选预留。
+# 不另写 status 过滤、不写任何状态。关键词 q（strip() 归一化后作整串单一子串、大小写
+# 不敏感的标题/描述包含匹配）与 2.7 的 category / condition / min_price / max_price
+# 共处于同一 queryset：4 个筛选参数逐条独立归一化与校验（strip() 空串视为未提供、
+# 枚举白名单、Decimal 解析、非负、lo > hi 时整对价格条件忽略），有效条件以 AND 链式
+# 叠加在 visible() 与 q 链之后，无效者静默忽略、页面恒 200；其余未识别参数一律忽略。
 # prefetch_related('images') 一次取回全部首图，消除 N+1；
 # 排序沿用 Product.Meta.ordering('-created_at')，全量上架商品均可达，不分页 / 不截断。
 @require_safe
 def product_list_view(request):
-    """商品列表（买家侧，公开只读）：仅上架商品，可按关键词搜索标题或描述。"""
+    """商品列表（买家侧，公开只读）：仅上架商品，可按关键词搜索并组合分类/价格/成色筛选。"""
     search_query = request.GET.get('q', '').strip()
     search_active = bool(search_query)
+
+    # 2.7：4 个筛选参数独立归一化；保留 strip() 后的原样值用于控件回显（模板自动转义）。
+    filter_category = request.GET.get('category', '').strip()
+    filter_condition = request.GET.get('condition', '').strip()
+    filter_min_price = request.GET.get('min_price', '').strip()
+    filter_max_price = request.GET.get('max_price', '').strip()
+
+    # 枚举白名单：越界值不进入 ORM 查询条件。
+    category = (
+        filter_category if filter_category in dict(Product.CATEGORY_CHOICES) else ''
+    )
+    condition = (
+        filter_condition if filter_condition in dict(Product.CONDITION_CHOICES) else ''
+    )
+    min_price = _parse_nonnegative_price(filter_min_price)
+    max_price = _parse_nonnegative_price(filter_max_price)
+    # 倒置区间：整对价格条件一并忽略（仅 lo > hi 时，不牵连其他有效条件）。
+    if min_price is not None and max_price is not None and min_price > max_price:
+        min_price = max_price = None
+
     products_qs = Product.objects.visible()
     if search_active:
         products_qs = products_qs.filter(
             Q(title__icontains=search_query) | Q(description__icontains=search_query)
         )
+    # 所有有效条件与 q 链共存于同一 queryset，天然 AND；只提供一端时仅叠加该端。
+    if category:
+        products_qs = products_qs.filter(category=category)
+    if condition:
+        products_qs = products_qs.filter(condition=condition)
+    if min_price is not None:
+        products_qs = products_qs.filter(price__gte=min_price)
+    if max_price is not None:
+        products_qs = products_qs.filter(price__lte=max_price)
+
+    # 只要有任一有效筛选条件生效，即为筛选态；无效条件静默忽略后退回全量。
+    filter_active = any((
+        category, condition, min_price is not None, max_price is not None,
+    ))
     products = list(products_qs.prefetch_related('images'))
+
+    # 「清空筛选」仅清除 4 个筛选参数并保留 q；无 q 时指向 /listings/。
+    clear_filter_url = reverse('product_list')
+    if search_query:
+        clear_filter_url += '?' + urlencode({'q': search_query})
+
     return render(request, 'listings/product_list.html', {
         'products': products,
         'products_empty': not products,
         'search_query': search_query,
         'search_active': search_active,
         'result_count': len(products),
+        'filter_active': filter_active,
+        'filter_category': filter_category,
+        'filter_condition': filter_condition,
+        'filter_min_price': filter_min_price,
+        'filter_max_price': filter_max_price,
+        'category_choices': Product.CATEGORY_CHOICES,
+        'condition_choices': Product.CONDITION_CHOICES,
+        'clear_filter_url': clear_filter_url,
     })
