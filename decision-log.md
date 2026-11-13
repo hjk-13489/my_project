@@ -460,3 +460,27 @@
     *   依据 2：EC-7（0 图商品不传新图即可重提，绕过「每商品 ≥1 张图片」）与 VG-1（「我的消息」是冻结决策 ① 下唯一的界面重提入口，改坏 `can_resubmit` 后 120 用例仍全绿）都是可复现的真实缺口，最小修复琐碎、不增公共表面、只守护已演示状态 → `patch`。
 *   **结果**：resume 同一实现子代理下发 3 条最小修复——`resubmit_view` 加 0 图中文错误守卫且不写库；`RejectionNoticeAndResubmitTests` 由 18 例增至 21 例（入口出现 / 消失、`can_resubmit` 两态、0 图守卫），并给 2 个受守卫影响的夹具补图。
 *   **事后验证**：补丁后 `check` 0 issues、`makemigrations --check --dry-run` → No changes detected、`migrate` → No migrations to apply、`test -v 2` → **123 tests OK**（102 既有 + 21 新增），21 个新用例逐条 ok；`diff_file` 重刷为 73,165 B / 1002 行；`review_loop_iteration` 保持 0。
+
+---
+## D-041: Story 4.4 三项意图缺口全部选 A —— 模型先于页面就位、状态机全量落地、迁移立即执行
+
+*   **触发阶段**：`/bmad-build` Step 2（CHECKPOINT 1 前的 Open Questions Q1–Q3）
+*   **智能体的建议**：调查发现 4.1–4.3 仍在 `backlog`、`orders` 是无实体的空脚手架，4.4 的状态机没有订单可挂。Q1 前置处理（A 随 4.4 落最小 `Order` / B 先做 4.1 再回 4.4 / C 只写常量不落模型）；Q2 方法边界（A 全量实现 AD-5 四个方法 + `mark_reviewed()` / B 只做 `pay()`）；Q3 迁移（A 生成并 `migrate` / B 只生成）。逐项推荐 A。
+*   **我们的判断与依据**：**采纳（Q1=A、Q2=A、Q3=A）**。
+    *   依据 1：Q1=A 让状态机这个「Epic 4 的核心资产」先于页面就位，4.1 只需补下单页与创建视图，避免 B 把本轮体量翻倍、也避免 C 的返工接线。
+    *   依据 2：Q2=A 与 `epic-4-context.md` 的「4.4 是 4.2／4.6／4.7／4.8 共同底座」一致；若只做 `pay()`，4.4 的「沿 FR-20 正常路径与退款分支流转」只能靠改表 + 直接赋 `status` 验证，与「不得直接改 status」自相矛盾。
+    *   依据 3：Q3=A 与 D-038 Q4=A 的既有尺度一致，模型真正可用、测试跑真实 schema。
+*   **结果**：规格冻结 `Order` 字段（buyer / product(PROTECT) / price 快照 / message / status / 时间戳）与 8 态枚举 + 转移表；`route: dispatch`，CHECKPOINT 1 批准后同会话完成实现与审查。
+*   **事后验证**：`check` 0 issues、`makemigrations --check` → No changes detected、`orders` 16 例 OK、全量 **240 例 OK**（236 既有 + 4 补测）；迁移 `orders/0001_initial.py` 已应用。
+
+---
+## D-042: 三层审查 27 条 → 21 驳回 + 5 组 patch，接受「按库内状态条件更新」作为状态机守卫
+
+*   **触发阶段**：`/bmad-build` Step 4 三层审查与 patch 路由（Story 4.4）
+*   **智能体的建议**：Blind Hunter 21 条 / Edge Case Hunter 4 条 / Verification Gap 2 条，共 27 条。逐条核验后 10 条 `false`、11 条 `low → rejected`、5 组 `medium → patch`（陈旧实例并发覆盖、两跳原子回滚无测试、`resolve_refund` 非布尔入参、`dispute` 状态未覆盖、价格快照夹具污染），0 defer、无 loopback。
+*   **我们的判断与依据**：**采纳（5 组 patch）**。
+    *   依据 1：Verification Gap 层实测出一条真实坏结果——A 已退款进入「纠纷」后，仍持「已支付/待交付」的陈旧 B 调 `confirm_receipt()` 不抛错，把状态改写成「已完成」，直接违反 FR-24「纠纷分支不再通向确认收货」。这不是假想并发，而是状态机的核心职责，不能像 2.2/2.3 那样留待 5.1（当时无任何状态转移方法落地）。
+    *   依据 2：`'false'` 这类字符串一旦从视图表单传入，会把管理员「拒绝退款」记成不可恢复的「退款成功」，修复只是加一道 `bool` 闸门，属直接修正。
+    *   依据 3：其余 21 条或为规格编辑类（修复=编辑本次 build 的规格）、或为交付路径不可达（脏状态、删用户、半提交）、或为提前优化与跨故事契约（索引、分阶段时间戳、`ValidationError` 转换），按 triage 规则驳回。
+*   **结果**：resume 同一实现子代理下发 4 条最小修复——`_transition()` 改为 `transaction.atomic()` 内 `filter(pk=..., status=self.status).update(...)`，命中 0 行抛 `InvalidTransition`；`resolve_refund()` 加 `bool` 闸门；补 4 例测试；`test_price_is_snapshot` 改用独立商品。
+*   **事后验证**：补丁后 `check` 0 issues、`makemigrations --check --dry-run` → No changes detected、`orders` 16 例 OK、全量 240 例 OK；`review_loop_iteration` 保持 0。
