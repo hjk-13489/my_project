@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ product.title }} - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<div class="row g-4">
+    <div class="col-lg-7">
+        {% with images=product.images.all %}
+            {% if images %}
+                <div class="d-flex flex-column gap-3">
+                    {% for image in images %}
+                        <img src="{{ image.image.url }}" class="img-fluid rounded border" alt="{{ product.title }}">
+                    {% endfor %}
+                </div>
+            {% else %}
+                <div class="d-flex align-items-center justify-content-center bg-light text-muted rounded" style="height: 320px;">暂无图片</div>
+            {% endif %}
+        {% endwith %}
+    </div>
+    <div class="col-lg-5">
+        <h2 class="mb-3">{{ product.title }}</h2>
+        <p class="fs-3 text-danger fw-bold">¥{{ product.price }}</p>
+        <p class="mb-1">成色：{{ product.get_condition_display }}</p>
+        <p class="mb-1">分类：{{ product.category }}</p>
+        <p class="mb-1">商品描述：{{ product.description }}</p>
+        <hr>
+        <p class="mb-3">
+            卖家：{{ product.owner.username }}
+            {% if product.owner.is_verified %}
+                <span class="badge bg-success">✓ 已认证</span>
+            {% else %}
+                <span class="badge bg-warning text-dark">待认证</span>
+            {% endif %}
+        </p>
+        <hr>
+        {% if user.is_authenticated %}
+            <a href="#" class="btn btn-primary me-2">联系卖家</a>
+            <a href="#" class="btn btn-success">立即购买</a>
+        {% else %}
+            <a href="{% url 'login' %}" class="btn btn-outline-primary me-2">登录后联系卖家</a>
+            <a href="{% url 'login' %}" class="btn btn-outline-success">登录后购买</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

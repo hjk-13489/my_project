@@ -105,6 +105,7 @@
                         <h5 class="card-title">{{ product.title }}</h5>
                         <p class="card-text mb-1">¥{{ product.price }}</p>
                         <p class="card-text text-muted mb-0">成色：{{ product.get_condition_display }}</p>
+                        <a href="{% url 'product_detail' product.pk %}" class="btn btn-outline-primary btn-sm mt-2">查看详情</a>
                     </div>
                 </div>
             </div>

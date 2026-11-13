@@ -2717,3 +2717,464 @@ class ProductFilterViewTests(TestCase):
         self.assertContains(listing, 'name="category"')
         self.assertContains(listing, '全部分类')
         self.assertContains(listing, '筛选</button>')
+
+# ---------- Story 2.8：商品详情页（公开只读，唯一门控 visible()）----------
+import os
+import re
+import shutil
+import tempfile
+import time
+from decimal import Decimal
+from io import BytesIO
+
+import config.urls
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
+from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
+from PIL import Image as PILImage
+
+from accounts.models import User, VerificationRequest
+from listings.models import Product, ProductImage, RejectionNotice
+
+_STORY28_MEDIA_ROOT = tempfile.mkdtemp(prefix='story28-media-')
+
+
+def _story28_image(name='photo.jpg', fmt='JPEG'):
+    """生成一张 Pillow 真实 JPEG/PNG 内存图片，供 2.8 测试图片夹具使用。"""
+    buf = BytesIO()
+    PILImage.new('RGB', (8, 8), (200, 30, 30)).save(buf, format=fmt)
+    content_type = 'image/jpeg' if fmt == 'JPEG' else 'image/png'
+    return SimpleUploadedFile(name, buf.getvalue(), content_type=content_type)
+
+
+@override_settings(MEDIA_ROOT=_STORY28_MEDIA_ROOT)
+class ProductDetailViewTests(TestCase):
+    """覆盖 spec-2-8 I/O 矩阵与 9 条 AC：单图 / 5 图 / 0 图、四态门控与角色无关 404、
+    混合态、非法 / 不存在 pk、认证两态、隐私、转义、五类访问者、只读 405 与 HEAD 200、
+    列表入口、查询数不随图片数增长、单次 GET < 1s、共享表面与禁改回归、既有 202 例全绿。"""
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(_STORY28_MEDIA_ROOT, ignore_errors=True)
+
+    def setUp(self):
+        shutil.rmtree(_STORY28_MEDIA_ROOT, ignore_errors=True)
+        os.makedirs(_STORY28_MEDIA_ROOT, exist_ok=True)
+        self.owner = User.objects.create_user(
+            student_id='20282801', username='卖家甲28', password='testpass12345'
+        )
+        self.other = User.objects.create_user(
+            student_id='20282802', username='卖家乙28', password='testpass12345'
+        )
+        self.list_url = reverse('product_list')
+
+    # ---------- helpers ----------
+    def _make_product(self, title, description=None, status='approved', owner=None,
+                      price=Decimal('25.00'), condition='良好', category='教材'):
+        return Product.objects.create(
+            owner=owner or self.owner,
+            title=title,
+            description=description if description is not None else ('描述文本-%s' % title),
+            price=price,
+            condition=condition,
+            category=category,
+            status=status,
+        )
+
+    def _attach_images(self, product, count=1, prefix='img28'):
+        for i in range(count):
+            ProductImage.objects.create(
+                product=product, image=_story28_image(f'{prefix}_{i}.jpg')
+            )
+
+    def _detail_url(self, pk):
+        return reverse('product_detail', args=[pk])
+
+    def _get(self, pk):
+        return self.client.get(self._detail_url(pk))
+
+    def _snapshot(self):
+        return list(
+            Product.objects.values(
+                'pk', 'owner_id', 'title', 'description', 'price', 'condition',
+                'category', 'status', 'created_at', 'updated_at',
+            ).order_by('pk')
+        )
+
+    def _media_snapshot(self):
+        result = []
+        for root, dirs, files in os.walk(_STORY28_MEDIA_ROOT):
+            for name in files:
+                result.append(
+                    os.path.relpath(os.path.join(root, name), _STORY28_MEDIA_ROOT)
+                )
+        return sorted(result)
+
+    def _count_queries_for_get(self, pk):
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self._get(pk)
+        self.assertEqual(resp.status_code, 200)
+        return len(ctx)
+
+    # ---------- 路由契约 ----------
+    def test_reverse_and_url_contract(self):
+        self.assertEqual(reverse('product_detail', args=[7]), '/listings/7/')
+        self.assertEqual(reverse('product_list'), '/listings/')
+        product = self._make_product('路由商品28')
+        self.assertEqual(self._detail_url(product.pk), '/listings/%d/' % product.pk)
+
+    # ---------- 上架单图：全部字段 + 图片 + 昵称 + 认证徽标 ----------
+    def test_approved_single_image_all_fields_and_badge(self):
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        product = self._make_product('单图商品28')
+        self._attach_images(product, count=1, prefix='single')
+        image_url = list(product.images.all())[0].image.url
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, 'listings/product_detail.html')
+        self.assertEqual(resp.context['product'].pk, product.pk)
+        self.assertContains(resp, '单图商品28')
+        self.assertContains(resp, '描述文本-单图商品28')
+        self.assertContains(resp, '¥25.00')
+        self.assertContains(resp, product.get_condition_display())
+        self.assertContains(resp, '教材')
+        self.assertContains(resp, self.owner.username)
+        self.assertContains(resp, '✓ 已认证')
+        self.assertContains(resp, 'src="%s"' % image_url)
+        self.assertContains(resp, '<img', count=1)
+        self.assertNotContains(resp, '<img src=""')
+
+    # ---------- 上架多图：全部图片、URL 各异、顺序稳定、不仅首图 ----------
+    def test_approved_five_images_all_distinct_not_just_first(self):
+        product = self._make_product('五图商品28')
+        self._attach_images(product, count=5, prefix='five')
+        urls = [img.image.url for img in product.images.all()]
+        self.assertEqual(len(urls), 5)
+        self.assertEqual(len(set(urls)), 5)
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '<img', count=5)
+        for url in urls:
+            self.assertContains(resp, 'src="%s"' % url)
+        rendered = re.findall(r'<img[^>]*src="([^"]+)"', resp.content.decode())
+        self.assertEqual(rendered, urls)
+
+    # ---------- 上架零图：中文占位、无空 <img> ----------
+    def test_approved_zero_images_chinese_placeholder(self):
+        product = self._make_product('零图商品28')
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '暂无图片')
+        self.assertNotContains(resp, '<img')
+        self.assertNotContains(resp, 'src=""')
+        self.assertContains(resp, '零图商品28')
+        self.assertContains(resp, '¥25.00')
+
+    # ---------- 四态门控：仅 approved 200，三态 404 且无泄露 ----------
+    def test_four_status_gate_only_approved_200_no_leak(self):
+        approved = self._make_product('上架命中28', price=Decimal('11.11'))
+        hidden = []
+        for i, (label, status) in enumerate(
+            (('待审', 'pending'), ('驳回', 'rejected'), ('下架', 'offline'))
+        ):
+            product = self._make_product(
+                '隐藏%s28' % label, status=status, price=Decimal('99.99'),
+                description='绝密描述%s28' % label,
+            )
+            self._attach_images(product, count=1, prefix='hidden_%d' % i)
+            hidden.append(product)
+        self._attach_images(approved, count=1, prefix='ok')
+        resp = self._get(approved.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '上架命中28')
+        for product in hidden:
+            bad = self._get(product.pk)
+            self.assertEqual(bad.status_code, 404)
+            self.assertNotContains(bad, product.title, status_code=404)
+            self.assertNotContains(bad, product.description, status_code=404)
+            self.assertNotContains(bad, '99.99', status_code=404)
+            self.assertNotContains(bad, product.owner.username, status_code=404)
+            leaked_url = list(product.images.all())[0].image.url
+            self.assertNotContains(bad, leaked_url, status_code=404)
+            self.assertFalse(Product.objects.visible().filter(pk=product.pk).exists())
+
+    # ---------- 混合态：visible().exists() 与响应一致 ----------
+    def test_mixed_states_visible_exists_matches_response(self):
+        specs = [
+            ('上架甲28', 'approved'), ('待审乙28', 'pending'),
+            ('驳回丙28', 'rejected'), ('下架丁28', 'offline'),
+        ]
+        for title, status in specs:
+            product = self._make_product(title, status=status)
+            exists = Product.objects.visible().filter(pk=product.pk).exists()
+            resp = self._get(product.pk)
+            self.assertEqual(resp.status_code == 200, exists, msg=title)
+
+    # ---------- 角色无关 404：卖家本人 / admin 访问自己的非上架商品仍 404 ----------
+    def test_nonapproved_404_for_owner_and_admin(self):
+        product = self._make_product('本人待审28', status='pending')
+        self.assertEqual(self._get(product.pk).status_code, 404)
+        self.client.force_login(self.owner)
+        self.assertEqual(self._get(product.pk).status_code, 404)
+        admin = User.objects.create_user(
+            student_id='20282899', username='管理员28', password='testpass12345'
+        )
+        admin.role = 'admin'
+        admin.save(update_fields=['role'])
+        self.client.force_login(admin)
+        self.assertEqual(self._get(product.pk).status_code, 404)
+
+    # ---------- 不存在 / 非法主键 ----------
+    def test_nonexistent_and_invalid_pk_return_404(self):
+        self.assertEqual(self._get(999999).status_code, 404)
+        self.assertEqual(self.client.get('/listings/abc/').status_code, 404)
+        self.assertEqual(self.client.get('/listings/-1/').status_code, 404)
+
+    # ---------- 已登录操作入口：只就位、不跳转、无死链 ----------
+    def test_logged_in_action_entries_present_without_dead_links(self):
+        product = self._make_product('入口商品28')
+        self._attach_images(product, count=1, prefix='entry')
+        self.client.force_login(self.owner)
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '联系卖家')
+        self.assertContains(resp, '立即购买')
+        self.assertContains(resp, 'href="#"', count=2)
+        self.assertNotContains(resp, '登录后')
+        self.assertNotContains(resp, '/chat')
+        self.assertNotContains(resp, '/orders')
+        self.assertNotContains(resp, '/dashboard')
+        self.assertNotContains(resp, 'NoReverseMatch')
+
+    # ---------- 匿名登录引导 ----------
+    def test_anonymous_login_guidance(self):
+        product = self._make_product('匿名商品28')
+        self._attach_images(product, count=1, prefix='anon')
+        login_url = reverse('login')
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, '登录后联系卖家')
+        self.assertContains(resp, '登录后购买')
+        self.assertContains(resp, 'href="%s"' % login_url)
+        self.assertNotContains(resp, 'href="#"')
+        self.assertNotContains(resp, '>联系卖家</a>')
+        self.assertNotContains(resp, '>立即购买</a>')
+
+    # ---------- 认证两态徽标 ----------
+    def test_badge_two_states(self):
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        product = self._make_product('徽标商品28')
+        resp = self._get(product.pk)
+        self.assertContains(resp, '✓ 已认证')
+        self.assertNotContains(resp, '待认证')
+        self.owner.is_verified = False
+        self.owner.save(update_fields=['is_verified'])
+        resp2 = self._get(product.pk)
+        self.assertContains(resp2, '待认证')
+        self.assertNotContains(resp2, '✓ 已认证')
+
+    # ---------- 隐私：学号 / 真实姓名 / QQ / 微信 / __str__ 形态 ----------
+    def test_privacy_no_student_id_name_qq_wechat(self):
+        VerificationRequest.objects.create(
+            user=self.owner, student_id=self.owner.student_id,
+            name='真实姓名甲28', status='approved',
+        )
+        product = self._make_product('隐私商品28')
+        self._attach_images(product, count=1, prefix='priv')
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, self.owner.username)
+        self.assertNotContains(resp, self.owner.student_id)
+        self.assertNotContains(resp, str(self.owner))
+        self.assertNotContains(resp, '真实姓名甲28')
+        self.assertNotContains(resp, 'QQ')
+        self.assertNotContains(resp, '微信')
+
+    # ---------- 转义 ----------
+    def test_title_and_description_are_html_escaped(self):
+        payload = '<script>alert(1)</script>'
+        product = self._make_product(payload, description=payload)
+        self._attach_images(product, count=1, prefix='esc')
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, '<script>alert(1)</script>')
+        self.assertNotContains(resp, '<script>')
+        self.assertContains(resp, '&lt;script&gt;alert(1)&lt;/script&gt;')
+
+    # ---------- 五类访问者均 200、同一份商品信息 ----------
+    def test_five_user_states_all_200_same_product_info(self):
+        product = self._make_product('公开商品28', price=Decimal('66.66'))
+        self._attach_images(product, count=1, prefix='public')
+        image_url = list(product.images.all())[0].image.url
+        self.owner.is_verified = True
+        self.owner.save(update_fields=['is_verified'])
+        verified = User.objects.create_user(
+            student_id='20282811', username='已认证访客28', password='testpass12345'
+        )
+        verified.is_verified = True
+        verified.save(update_fields=['is_verified'])
+        unverified = User.objects.create_user(
+            student_id='20282812', username='未认证访客28', password='testpass12345'
+        )
+        admin = User.objects.create_user(
+            student_id='20282813', username='管理员乙28', password='testpass12345'
+        )
+        admin.role = 'admin'
+        admin.save(update_fields=['role'])
+        cases = [
+            ('匿名', None),
+            ('已登录已认证', verified),
+            ('已登录未认证', unverified),
+            ('卖家本人', self.owner),
+            ('管理员', admin),
+        ]
+        for label, user in cases:
+            with self.subTest(label=label):
+                self.client.logout()
+                if user is not None:
+                    self.client.force_login(user)
+                resp = self._get(product.pk)
+                self.assertEqual(resp.status_code, 200)
+                for text in (
+                    '公开商品28', '¥66.66', product.get_condition_display(),
+                    self.owner.username, '✓ 已认证', 'src="%s"' % image_url,
+                ):
+                    self.assertContains(resp, text)
+                if user is None:
+                    self.assertContains(resp, '登录后联系卖家')
+                    self.assertNotContains(resp, 'href="#"')
+                else:
+                    self.assertContains(resp, 'href="#"', count=2)
+                    self.assertNotContains(resp, '登录后')
+
+    # ---------- 只读：POST/PUT/PATCH/DELETE 405、HEAD 200、无任何写入 ----------
+    def test_unsafe_methods_405_no_writes_and_head_200(self):
+        product = self._make_product('只读商品28')
+        self._attach_images(product, count=1, prefix='ro')
+        before = self._snapshot()
+        before_media = self._media_snapshot()
+        before_images = list(ProductImage.objects.values('pk', 'product_id', 'image'))
+        url = self._detail_url(product.pk)
+        for method in (
+            self.client.post, self.client.put, self.client.patch, self.client.delete,
+        ):
+            resp = method(url, {'title': 'hacked'})
+            self.assertEqual(resp.status_code, 405, msg=method)
+            self.assertEqual(resp['Allow'], 'GET, HEAD')
+        self.assertEqual(self.client.head(url).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(self._media_snapshot(), before_media)
+        self.assertEqual(
+            list(ProductImage.objects.values('pk', 'product_id', 'image')),
+            before_images,
+        )
+        self.assertEqual(RejectionNotice.objects.count(), 0)
+
+    def test_get_is_read_only(self):
+        product = self._make_product('只读GET28')
+        self._attach_images(product, count=1, prefix='roget')
+        before = self._snapshot()
+        before_media = self._media_snapshot()
+        self.assertEqual(self._get(product.pk).status_code, 200)
+        self.assertEqual(self._snapshot(), before)
+        self.assertEqual(self._media_snapshot(), before_media)
+
+    # ---------- 列表 / 搜索 / 组合筛选卡片「查看详情」入口 ----------
+    def test_list_search_filter_card_detail_link(self):
+        product = self._make_product('卡片命中28')
+        self._attach_images(product, count=1, prefix='card')
+        detail_href = 'href="%s"' % self._detail_url(product.pk)
+        cases = [
+            ('列表', {}),
+            ('搜索', {'q': '卡片'}),
+            ('组合筛选', {
+                'category': '教材', 'condition': '良好',
+                'min_price': '10', 'max_price': '100',
+            }),
+        ]
+        for label, params in cases:
+            with self.subTest(label=label):
+                resp = self.client.get(self.list_url, params)
+                self.assertEqual(resp.status_code, 200)
+                self.assertContains(resp, '查看详情')
+                self.assertContains(resp, detail_href)
+                self.assertContains(resp, '<img', count=1)
+                self.assertContains(resp, 'class="card h-100"')
+                self.assertContains(resp, '卡片命中28')
+                self.assertContains(resp, '¥25.00')
+                self.assertContains(resp, '成色：良好')
+                self.assertEqual(
+                    self.client.get(self._detail_url(product.pk)).status_code, 200
+                )
+        self.assertEqual(self._detail_url(product.pk), '/listings/%d/' % product.pk)
+        self.assertEqual(reverse('product_list'), '/listings/')
+
+    # ---------- 查询数不随图片数增长（select_related + prefetch_related）----------
+    def test_query_count_independent_of_image_count(self):
+        product = self._make_product('查询数商品28')
+        self._attach_images(product, count=1, prefix='q1')
+        q_one = self._count_queries_for_get(product.pk)
+        # 绝对查询数基线：单件商品 + 1 图在 select_related('owner') + prefetch_related('images')
+        # 下应恰好 2 条（商品+卖家 JOIN 1 条、图片预取 1 条）。移除这两个优化会退化为 3 条
+        # （多出卖家懒加载查询），此断言即失败，从而捕获 N+1 优化回归。
+        self.assertEqual(q_one, 2)
+        self._attach_images(product, count=4, prefix='q5')
+        q_five = self._count_queries_for_get(product.pk)
+        self.assertEqual(q_one, q_five)
+        self.assertLessEqual(q_five, 5)
+
+    # ---------- 单次 GET < 1s ----------
+    def test_single_get_under_one_second(self):
+        product = self._make_product('性能商品28')
+        self._attach_images(product, count=5, prefix='perf')
+        start = time.perf_counter()
+        resp = self._get(product.pk)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(resp.status_code, 200)
+        self.assertLess(elapsed, 1.0)
+
+    # ---------- 共享表面回归：首页入口 count=2，详情页不新增 /listings/ 链接 ----------
+    def test_shared_surface_home_entries_unchanged(self):
+        product = self._make_product('共享回归28')
+        self._attach_images(product, count=1, prefix='shared')
+        home = self.client.get(reverse('home'))
+        self.assertEqual(home.status_code, 200)
+        self.assertContains(home, '商品浏览')
+        self.assertContains(home, 'href="%s"' % reverse('product_list'), count=2)
+        detail = self._get(product.pk)
+        self.assertContains(detail, 'href="%s"' % reverse('product_list'), count=1)
+        self.assertNotIn(
+            'href="%s"' % reverse('product_list'),
+            'href="%s"' % self._detail_url(product.pk),
+        )
+
+    # ---------- 不改 Epic 3/4/5：无新路由 / 占位页 / 死链 ----------
+    def test_no_epic3_4_5_routes_or_dead_links(self):
+        patterns = [str(p.pattern) for p in config.urls.urlpatterns]
+        for token in ('chat', 'orders', 'dashboard'):
+            self.assertFalse(any(token in pat for pat in patterns), msg=token)
+        product = self._make_product('路由守卫28')
+        self._attach_images(product, count=1, prefix='guard')
+        self.client.force_login(self.owner)
+        resp = self._get(product.pk)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotContains(resp, 'NoReverseMatch')
+        for dead in ('/chat', '/orders', '/dashboard'):
+            self.assertNotContains(resp, dead)
+
+    # ---------- 门控唯一性：visible() 是全仓唯一 approved 门控 ----------
+    def test_visible_is_the_only_status_gate_in_source(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, 'listings', 'views.py'), encoding='utf-8') as f:
+            views_source = f.read()
+        with open(os.path.join(root, 'listings', 'models.py'), encoding='utf-8') as f:
+            models_source = f.read()
+        self.assertIn('Product.objects.visible()', views_source)
+        self.assertNotIn("filter(status='approved')", views_source)
+        self.assertEqual(models_source.count("status='approved'"), 1)
+
