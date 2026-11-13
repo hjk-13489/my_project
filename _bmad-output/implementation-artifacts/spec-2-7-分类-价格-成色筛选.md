@@ -180,3 +180,21 @@ context:
 
 **Manual checks (if no CLI):**
 - 构造若干 `approved` 商品（分类 / 成色 / 价格各档，含有图 / 无图）与 `pending / rejected / offline` 各一件且满足全部筛选条件，打开 `/listings/?category=...&min_price=...&max_price=...&condition=...` 核对仅满足全部条件的已上架商品出现、卡片四要素与倒序、无结果中文提示；叠加 `q` 核对组合语义与搜索词不丢失；去掉全部参数确认回到 2.5 / 2.6 全量列表；退出登录后确认匿名筛选仍 200；从首页与导航栏各点一次「商品浏览」确认可达。
+
+## Code Review（独立复审，2026-11-13）
+
+### Review Findings
+
+- 本轮由 `bmad-code-review` 独立复审：diff 基线 `150e288..03026ed`（1136 行 / 5 文件 / +1038−5），`review_mode=full`，启用 Edge Case Hunter + Acceptance Auditor 两层（Blind Hunter / Verification Gap 由团队级覆盖禁用），`failed_layers` 为空。共 **7 条原始发现**，逐条独立核验后 **7 条全部驳回**（2 `low → rejected`、5 `false`）；0 `decision-needed` / 0 `patch` / 0 `defer` / 0 未决 `high`·`medium`，无 loopback，`review_loop_iteration` 保持 **0**。结论：**✅ Clean review — all layers passed.**
+- 独立验证证据：只读 ORM 复现 12 种价格输入；`ProductFilterViewTests` **29 例 OK（17.906s）**；隔离测试库（`setup_databases` + teardown）端到端 7 场景（无参数 / `99999999999` / `1_0` / `1e2` / `１２` / `abc` / 全非法组合）全部 200，未触碰运行时 `db.sqlite3`。
+- 过程观察：diff 内含本规格自带的首轮 `## Review Triage Log`，Acceptance Auditor 直接引用了 BH-6 / EC-2 / BH-11 / BH-7 / BH-8 的前轮结论，独立复审仍被前轮结论锚定（与 2.6 独立复审同类现象）。本轮 triage 的驳回依据均来自代码、规格原文与实测，不采信前轮结论。
+
+**Rejected**
+
+- [edge-case-hunter] `low` → rejected — 「价格超 `DecimalField(10,2)` 量级 / 精度未设守卫，超大值进入 ORM 返回空集而非被忽略」：实测 `?min_price=99999999999` → 0 件、200、「没有符合筛选条件的商品」，事实成立；但冻结决策 ② 的无效值集合（strip 空串 / 枚举越界 / `Decimal` 解析失败 / 负数 / `lo>hi`）与 L66 矩阵均不含超大量级，L31 的校验清单只列 `Decimal` 解析与非负，按规格口径该值有效、空结果即「没有这么贵的商品」。日常演示不会遇到 11 位价格，加 `adjusted()/exponent` 守卫属新增分支而非直接修正 → 按 `low` 驳回。
+- [edge-case-hunter] `low` → rejected — 「`1_0` / `1e2` / 全角数字被 `Decimal` 隐式转为真实价格」：实测 `1_0`→10（排除 5.00）、`1e2`→100、`１２`→12 均按真实价格过滤，事实成立；但需手工构造下划线 / 全角 URL，坏结果仅是按值过滤而非泄露 / 崩溃 / 状态错误；加字符白名单会误拒合法的 `1e2` / `+10`，属新增守卫与行为收窄 → 按 `low` 驳回。
+- [acceptance-auditor] `false` — 「价格筛选未对值域设守卫，违反 L31『越界值不得进入 ORM 查询条件』与 AC-3『不因非法值直接呈现空结果集』」：与上一条同根因；L31 该句紧接枚举白名单，括号内的校验清单只列 `Decimal` 解析与非负，AC-3（L108）与矩阵 L66-67 的非法值集合封闭列举且不含超大量级，故「违反 AC」不成立 → 驳回。
+- [acceptance-auditor] `false` — 「`min_price=1_0` 违反 AC-3 / 矩阵『非数字价格 → 静默忽略』」：L66 明定该行由「`Decimal` 解析守卫」承载，示例为 `abc` / 乱码（抛 `InvalidOperation`）；`Decimal('1_0')` 解析成功即规格定义的有效值，「用户视为非数字」不是规格口径 → 驳回。修复需编辑本规格。
+- [acceptance-auditor] `false` — 「NFR-1 单次 `perf_counter` 未覆盖 `epic-2-context.md:30` 的 P95 口径」：规格 L41 / L167 / AC（L113）已把 NFR-1 可执行口径固定为「查询数不随 N 增长 + 单次 GET < 1s」并明示课堂演示环境无法做真实 P95 压测；`test_single_get_under_one_second:2638-2649` 与 `assertLessEqual(q_large, 5):2636` 完全照此实现，实现未偏离冻结 AC → 驳回。澄清 P95 表述需编辑本规格 / context 文档。
+- [acceptance-auditor] `false` — 「价格控件回显 strip 后原始串，与 AC-6『各控件回显归一化取值』存在字面张力」：规格 L119 / Implementation Notes 明确「归一化」= `strip()`；`test_filter_context_variables:2512-2521` 硬断言 `' 教材 '→'教材'`、`' 10 '→'10'`；数值再格式化非规格要求，用户看到自己输入的原串，无坏结果 → 驳回。
+- [acceptance-auditor] `false` — 「全非法筛选参数时 `filter_active=False`，页面无『找到 N 件商品』与『清空筛选』」：规格 L35 明定「任一检索态（`search_active` 或 `filter_active`）」，`filter_active` 由有效条件构成，全非法时二者皆假即非检索态；冻结决策 ② 要求逐条静默忽略并「与 2.6 空 `q` 同口径退回全量」；端到端实测该态 200 / 3 件全量 / `filter_active=False`，且 `listings/tests.py:2337-2339,2395-2397,2443,2468-2473` 硬断言不出现「清空筛选」→ 驳回，修复需改冻结意图 = 编辑本规格。
