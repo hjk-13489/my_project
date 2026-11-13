@@ -97,6 +97,23 @@ context:
 - Given 非 `approved` 商品或匿名请求，when 尝试进入确认页或直接 POST，then 无任何 `Order` 产生。
 - Given 本轮改动，when 跑全量测试，then 既有 242 例与新增用例全绿、`makemigrations --check --dry-run` 报 No changes detected。
 
+### Review Findings
+
+**第二轮审查（2026-11-13，full 模式）**：审查基线 `bf730d2..HEAD`（12 文件，+589/−10）；团队定制 `_bmad/custom/bmad-code-review.toml` 启用 Edge Case Hunter 与 Acceptance Auditor，Blind Hunter / Verification Gap 被禁用。两层共 10 条发现，分诊后 `decision-needed` 0、`patch` 0、`defer` 0、rejected 10，零发现存活；`review_loop_iteration` 保持 0，无 loopback。本轮未修改 AC、Execution、Verification 等任何冻结区或验收口径，仅追加本审查记录。
+
+**Rejected**
+
+- `low` — 并发 POST 双建（`orders/views.py:32-45`）：D1 冻结决策明确不加 DB 唯一约束／新 migration，Design Notes 已把该理论窗口列为已接受取舍；SQLite 下 `select_for_update()` 为 no-op，修复需新增守卫或公共表面，非直接修正，演示环境难触发。
+- `low` — 事务内复用事务外 `product`（卖家并发改价／下架）：与上一条同源 TOCTOU，`visible()` 事务外取商品符合 Always 字面要求，修复需事务内重取加锁，增加复杂度且落在同一已接受窗口。
+- `low` — 确认页与提交间卖家改价（`order_confirm.html` / `orders/views.py`）：Always 与 AC1 明确 `price` 取「提交时商品价格」，按提交时价正是规格要求，且 4.2 之前无实际收费；修复需签名价格令牌／版本号等新公共表面。
+- `false` — `listings/tests.py` 移除 `/orders` 死链守卫但用例名仍含 Epic 4：`/orders/create/<pk>/` 已接通为真实路由，不再是死链；同处补了 `reverse('order_create')` 正向断言，`/chat`／`/dashboard` 守卫保留；紧邻注释已说明，且 `spec-2-8-商品详情页.md:131` 明确引用该用例名，改名反会破坏既有规格引用。
+- `low` — AC4「全仓检索」口径被自身 grep 命令与新增测试夹具证伪：`git grep` 确认 `orders/views.py`／`forms.py` 无 `status=` 赋值，`status=target`／`self.status = target` 仅在 `orders/models.py:_transition()` 内，新增 `status=status` 只出现在 `orders/tests.py` 夹具且 Verification 已注明夹具不在范围；属 AC 措辞而非代码缺陷，修复需编辑本规格。
+- `false` — D2「4.2 模拟支付挂点」仅一行 HTML 注释：独立 `order_detail.html` + 注释即为锚点，4.2 添加支付按钮本就必须编辑该模板；补 URL name／视图桩违反 Never「不实现模拟支付（4.2）」，坏结果不成立。
+- `low` — `CharField` 默认 `strip=True` 与 AC1「message 等于所填内容」不符：Django 标准表单行为、用户不可见；改 `strip=False` 需新增参数，且会让纯空白串变成「非空留言」、与矩阵「留言为空」行语义冲突，属增加复杂度而非直接修正。
+- `false` — 矩阵「PUT/DELETE → 405」对匿名不成立：RequestFactory 实测匿名 PUT／DELETE／POST／GET 一律 302 到 `/login/?next=...`，符合 Always「未登录跳登录页」与项目既定装饰器顺序（`listings/views.py:17-18`）；已登录 405 由 `test_unsafe_methods_405` 覆盖，匿名请求不产生订单或状态变更，无用户可见坏结果。
+- `low` — `listings/tests.py` 属 Execution／Code Map 清单外改动且移除 2.8 的 `/orders` 否定断言：Implementation Notes 已逐条披露，Never 只禁止 `listings` 的模型／视图／表单／迁移（tests.py 不在其列），否定断言移除已由 `reverse('order_create')` 正向断言补偿；「回填清单」的修复需编辑本规格。
+- `low` — AC6／Verification 基线数字（242）与 Implementation Notes（255／258）口径不一致：全量测试实跑全绿、代码与测试无缺陷，属验收期望值文档口径；修复需编辑本规格。
+
 ## Implementation Notes
 
 - 8 条 Execution 全部完成：`orders/forms.py` / `views.py` / `urls.py` 三个空壳填实，新增 `templates/orders/order_confirm.html` 与 `order_detail.html`，`config/urls.py` 追加 `orders` include，`product_detail.html:38` 占位 href 接通 `order_create`。

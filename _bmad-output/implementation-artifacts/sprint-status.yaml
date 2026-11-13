@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 11-05-2026 16:56
-last_updated: 11-13-2026 19:25
+last_updated: 11-13-2026 20:33
 project: my_project
 project_key: NOKEY
 tracking_system: file-system
@@ -63,7 +63,7 @@ development_status:
   epic-3-retrospective: optional
 
   epic-4: in-progress
-  4-1-下单创建订单: review
+  4-1-下单创建订单: done
   4-2-模拟支付: backlog
   4-3-下单后展示联系方式: backlog
   4-4-订单状态机: done
