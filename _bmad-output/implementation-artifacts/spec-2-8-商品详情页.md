@@ -110,6 +110,33 @@ context:
 - Given 交付的共享表面，When 查看 diff，Then `templates/base.html` 与 `templates/index.html` 为空；首页 `href="/listings/" count=2`、`accounts/tests.py` 的 `✓ 已认证 count=2` / `待认证 count=2` / `去认证 count=1` 等既有 202 例断言全部不破。
 - Given 交付范围，When 查看 diff 并跑校验，Then 不含 Epic 3 / 4 / 5 的路由 / 视图 / 实体 / 占位页（Decision ①）、不含任何写路径或状态赋值、不含迁移 / 新依赖 / 新静态资源 / 索引 / 缓存 / 分页；`models.py`、`forms.py`、`admin.py`、`migrations/`、`config/`、`requirements.txt`、`accounts/` 与既有 listing 模板（仅 `product_list.html` 按 Decision ④ 纯追加一个链接）无改动；既有 202 例 + 新用例全绿，`manage.py check` 0 issues、`makemigrations --check --dry-run` 为 `No changes detected`。
 
+### Review Findings
+
+第二轮独立复审（2026-11-13，基线 `dbc6e7a` → 提交 `b5739ea`；层：Edge Case Hunter + Acceptance Auditor，Blind Hunter / Verification Gap 按 `_bmad/custom/bmad-code-review.toml` 团队定制禁用）。核验：`check` 0 issues、`makemigrations --check --dry-run` → No changes detected、全量 224 例 OK。
+
+- [x] [Review][Patch] 匿名「登录后联系卖家 / 登录后购买」引导未带 `next`，登录后落到首页、丢失当前商品页 [templates/listings/product_detail.html:41-42]
+  - 证据：`accounts/views.py:49` 为 `next_url = request.GET.get('next') or 'home'`，匿名入口只写 `{% url 'login' %}`，故 `next` 恒为空 → 恒跳 `home`；登录模板 `<form method="post">` 无 `action`，POST 保留查询串，因此追加 `?next={{ request.path|urlencode }}` 即可端到端生效。
+  - 修复：两个匿名入口 href 追加 `?next={{ request.path|urlencode }}`；`assertContains(resp, 'href="%s"' % login_url)` 为子串匹配，不会被打断。仅调整 Decision ② 的字面 href、不新增路由，若坚持逐字遵守决策原文可改判为 defer。
+- [x] [Review][Patch] `test_no_epic3_4_5_routes_or_dead_links` 把「Epic 3/4/5 尚未存在」写成永久守卫，Epic 3 接入即变红 [listings/tests.py:3157-3160]
+  - 证据：该测试遍历 `config.urls.urlpatterns` 断言 `'chat' / 'orders' / 'dashboard'` 不出现在任何 pattern 字符串中。Epic 3（`3-1-买家发起聊天` 已是下一个待开发故事）一旦在 `config/urls.py` 加入 `path("chat/", include(...))`，该断言必然失败，后续故事只能删掉 2.8 的测试来解红——交付时点边界不该由永久回归测试承担，本轮 diff 本身已足以证明未新增这些路由。同方法内 `assertNotContains(resp, 'NoReverseMatch')` 恒为真（200 页不会渲染该字符串）。
+  - 修复：删除 `config.urls` 遍历断言（连同 `import config.urls`），保留响应级死链断言（`/chat` `/orders` `/dashboard` 不出现在详情页 HTML）。
+- [x] [Review][Patch] 图片顺序未显式固定，且「顺序稳定」断言以同源无序查询集自证 [listings/views.py:224-232；listings/tests.py:2857-2864]
+  - 证据：`ProductImage` 无 `Meta.ordering`（`listings/models.py:110-125`），视图 `prefetch_related('images')` 未带 `order_by`，模板直接遍历 `product.images.all`；`test_approved_five_images_all_distinct_not_just_first` 的期望值取自同一个无序 `product.images.all()`，即「无序对无序」，顺序实际漂移时该断言仍通过。当前 SQLite 下 rowid 序 == 主键升序，无用户可见坏结果，故仅 `low`。
+  - 修复：视图改 `Prefetch('images', queryset=ProductImage.objects.order_by('pk'))`，测试期望改 `product.images.order_by('pk')`；不动模型（避免违反「不改模型」约束）。
+- [x] [Review][Patch] Decision ④「纯追加」守卫是恒真断言，缺「查看详情 count=1」「整卡未包 `<a>`」有效断言 [listings/tests.py:3148-3155]
+  - 证据：`self.assertNotIn('href="/listings/"', 'href="/listings/<pk>/"')` 是两个常量互比（后者不以 `/"` 结尾），永远为真；`assertContains(detail, 'href="/listings/"', count=1)` 实际只数到 `base.html:14` 导航项。测试既未断言卡片「查看详情」出现 1 次，也未断言整卡未被 `<a>` 包裹，Decision ④ 的「既有节点一字不改」目前只能人工读 diff 确认。
+  - 修复：删除恒真 `assertNotIn`，改为 `assertContains(list_page, '查看详情', count=1)`；如需证明整卡未包 `<a>`，可断言卡片区 `<a href="/listings/<pk>/"` 之外不出现包裹 `card h-100` 的开标签。
+- [x] [Review][Defer] 真实部署下非安全方法返回 403 而非 AC 要求的 405（`Allow: GET, HEAD`）[listings/views.py:220] — deferred: pre-existing / 不可在本故事内修
+
+**4 条 patch 已于 2026-11-13 全部应用**：`product_detail.html` 两个匿名入口补 `?next={{ request.path|urlencode }}`（实测匿名点入口 → 登录 → 302 回 `/listings/<pk>/`）；`test_no_epic3_4_5_routes_or_dead_links` 改名 `test_no_epic3_4_5_dead_links` 并删去 `config.urls` 遍历；视图改 `Prefetch('images', queryset=ProductImage.objects.order_by('pk'))`、多图断言期望改 `images.order_by('pk')`；恒真 `assertNotIn` 换为「查看详情 count=1 + 指向详情的 `<a>` 仅 1 处 + 详情页不自链接」。复跑：`check` 0 issues、`makemigrations --check --dry-run` → No changes detected、全量 **224 例 OK**。
+
+**Rejected（4 条，不予修复）**
+
+- `low` — `listings/tests.py:3132-3139` 单次 GET `< 1.0s` 无预热/容差，慢 CI 可能偶发误报：该断言由 spec-2-5 决策 ④ 冻结口径要求，且 2.5 / 2.6 / 2.7 三个测试类已有同款（`tests.py:1415,1906,2638`）；被测页面仅 1 条 JOIN + 1 条预取，1s 上限余量极大，加预热请求反而引入无效复杂度。
+- `low` — `listings/tests.py:3171-3179` `test_visible_is_the_only_status_gate_in_source` 只读 `views.py` / `models.py`，撑不起「全仓唯一门控」：全仓检索确认生产代码 `status='approved'` 字面量当前仅在 `listings/models.py:14`（`views.py:64` 的 `status='rejected'` 是卖家侧重提门控，非 approved 门控），无现存缺陷；把守卫扩到全目录需新增文件遍历，超出直接修正。
+- `low` — `spec-2-8:5` `status: 'done'` 与 sprint `review` 矛盾：修复动作即编辑本次规格的状态字段，按 triage 规则驳回；状态同步由本工作流收尾步骤统一处理。
+- `low` — `listings/tests.py:2723-2739` 重复 import 既有模块顶部已导入的名字，且 `:2741` `tempfile.mkdtemp()` 在模块导入期执行：纯代码卫生，重复导入删除即可但 `mkdtemp` 需迁移到 `setUpClass` 才彻底，属超出直接修正的重构，无功能与可读性实质影响。
+
 ## Implementation Notes
 
 - **工作流状态更正（Step 3 主代理）**：实现子代理交付时自行把本规格 `status` 与 `sprint-status.yaml` 的 `2-8-商品详情页` 提前置为 `review`，并改写 `last_updated` 为 `13:24`。按 bmad-build 工作流，状态同步由主代理在 Step 3 / Step 4 收尾时负责，且独立复审尚未执行，故已撤回为 `in-progress`；`review` / `done` 待 Step 4 审查及后续独立复审完成后再同步。此更正不涉及冻结区与任何实现代码（与 Story 2.2 / 2.3 的同类越权处理一致）。

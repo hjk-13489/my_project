@@ -2,7 +2,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
 from django.utils.http import urlencode
@@ -218,15 +218,18 @@ def product_list_view(request):
 # 卖家本人 / admin 均可见同一份商品信息。对外可见性唯一门控是 Product.objects.visible()
 # （models.py:12-14），详情查询直接链式复用，不另写 status 过滤、不写任何状态、不按身份分支：
 # pending / rejected / offline 与不存在的 pk 一律 404，对任何角色都不放行。
-# select_related('owner') 消除卖家信息的额外查询，prefetch_related('images') 一次取回
-# 该商品全部图片（查询数不随图片数增长），不分页 / 不缓存 / 不引入索引。
+# select_related('owner') 消除卖家信息的额外查询，prefetch_related 一次取回该商品全部图片
+# （查询数不随图片数增长）。图片序在 Prefetch 上显式钉为 pk 升序，不依赖数据库默认返回顺序；
+# 不分页 / 不缓存 / 不引入索引。
 @require_safe
 def product_detail_view(request, pk):
     """商品详情（买家侧，公开只读）：仅上架商品，展示全部字段与图片、卖家昵称与认证状态。"""
     product = get_object_or_404(
         Product.objects.visible()
         .select_related('owner')
-        .prefetch_related('images'),
+        .prefetch_related(
+            Prefetch('images', queryset=ProductImage.objects.order_by('pk'))
+        ),
         pk=pk,
     )
     return render(request, 'listings/product_detail.html', {'product': product})

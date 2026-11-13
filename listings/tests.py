@@ -2727,7 +2727,6 @@ import time
 from decimal import Decimal
 from io import BytesIO
 
-import config.urls
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -2852,7 +2851,9 @@ class ProductDetailViewTests(TestCase):
     def test_approved_five_images_all_distinct_not_just_first(self):
         product = self._make_product('五图商品28')
         self._attach_images(product, count=5, prefix='five')
-        urls = [img.image.url for img in product.images.all()]
+        # 期望值取显式 pk 升序，不取无序的 images.all()：否则「无序对无序」，
+        # 渲染顺序真的漂移时该断言仍会通过。
+        urls = [img.image.url for img in product.images.order_by('pk')]
         self.assertEqual(len(urls), 5)
         self.assertEqual(len(set(urls)), 5)
         resp = self._get(product.pk)
@@ -3138,7 +3139,7 @@ class ProductDetailViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertLess(elapsed, 1.0)
 
-    # ---------- 共享表面回归：首页入口 count=2，详情页不新增 /listings/ 链接 ----------
+    # ---------- 共享表面回归：首页入口 count=2，详情页不新增 /listings/ 链接，卡片纯追加一个入口 ----------
     def test_shared_surface_home_entries_unchanged(self):
         product = self._make_product('共享回归28')
         self._attach_images(product, count=1, prefix='shared')
@@ -3147,23 +3148,25 @@ class ProductDetailViewTests(TestCase):
         self.assertContains(home, '商品浏览')
         self.assertContains(home, 'href="%s"' % reverse('product_list'), count=2)
         detail = self._get(product.pk)
+        # 详情页里 href="/listings/" 完整子串只来自导航栏（1 次）；详情页不得自链接
         self.assertContains(detail, 'href="%s"' % reverse('product_list'), count=1)
-        self.assertNotIn(
-            'href="%s"' % reverse('product_list'),
-            'href="%s"' % self._detail_url(product.pk),
+        self.assertNotContains(detail, 'href="%s"' % self._detail_url(product.pk))
+        # Decision ④ 纯追加：列表页「查看详情」链接恰好 1 个（该商品只有 1 件），
+        # 且指向详情的 <a> 只有 1 处——整卡若被 <a> 包裹会出现第 2 处
+        listing = self.client.get(self.list_url)
+        self.assertEqual(listing.status_code, 200)
+        self.assertContains(listing, '查看详情', count=1)
+        self.assertEqual(
+            listing.content.decode().count('href="%s"' % self._detail_url(product.pk)), 1
         )
 
-    # ---------- 不改 Epic 3/4/5：无新路由 / 占位页 / 死链 ----------
-    def test_no_epic3_4_5_routes_or_dead_links(self):
-        patterns = [str(p.pattern) for p in config.urls.urlpatterns]
-        for token in ('chat', 'orders', 'dashboard'):
-            self.assertFalse(any(token in pat for pat in patterns), msg=token)
+    # ---------- 不改 Epic 3/4/5：详情页无占位页 / 死链（路由缺席属交付时点边界，不做永久守卫）----------
+    def test_no_epic3_4_5_dead_links(self):
         product = self._make_product('路由守卫28')
         self._attach_images(product, count=1, prefix='guard')
         self.client.force_login(self.owner)
         resp = self._get(product.pk)
         self.assertEqual(resp.status_code, 200)
-        self.assertNotContains(resp, 'NoReverseMatch')
         for dead in ('/chat', '/orders', '/dashboard'):
             self.assertNotContains(resp, dead)
 

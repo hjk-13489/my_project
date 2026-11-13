@@ -39,3 +39,9 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-1-4-学号身份认证-用户提交.md`
   summary: 条件唯一约束（`UniqueConstraint` + `condition=Q(status='pending')`）在 MySQL 8.4 生产后端被 Django 静默跳过 — `supports_partial_indexes=False`，`accounts/views.py:105-110` 的 `except IntegrityError` 并发兜底永不触发，并发提交可写入两条 pending。
   evidence: deferred reason — 演示项目不切 MySQL（课堂作业/演示用途，生产不会切到 MySQL 8.4，当前 SQLite 下约束有效）；若未来切换生产后端，须先重新设计该约束。
+
+## Deferred from: code review of spec-2-8-商品详情页 (2026-11-13)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-2-8-商品详情页.md`
+  summary: 详情页非安全方法在真实部署下返回 403 而非 AC 要求的 405（`Allow: GET, HEAD`） — `@require_safe` 在 `CsrfViewMiddleware.process_view` 之后执行，实测 `Client(enforce_csrf_checks=True)` 的 POST/PUT/PATCH/DELETE 全部 403 且无 `Allow` 头；只有未启用 CSRF 校验的默认测试客户端才得 405。
+  evidence: deferred reason — 既有 `/listings/` 等全部 `@require_safe` 页面同一行为（项目级 Django 中间件顺序既定事实），两种情况下均无写入、不改 `status`，AC 的只读意图成立；修正需调整 config 级中间件或绕开 CSRF，超出 2.8 边界。
