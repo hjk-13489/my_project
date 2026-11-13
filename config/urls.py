@@ -32,6 +32,7 @@ urlpatterns = [
     path("", include("accounts.urls")),
     # 追加项不排在既有 path("", ...) 之前，避免抢占既有路由。
     path("listings/", include("listings.urls")),
+    path("orders/", include("orders.urls")),
 ]
 
 # 开发期媒体服务（闭合 deferred-work.md 中登记的待办）。

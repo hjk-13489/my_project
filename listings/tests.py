@@ -2944,10 +2944,11 @@ class ProductDetailViewTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, '联系卖家')
         self.assertContains(resp, '立即购买')
-        self.assertContains(resp, 'href="#"', count=2)
+        # 4.1 起「立即购买」接真实下单路由，仅「联系卖家」仍是 href="#" 占位。
+        self.assertContains(resp, 'href="#"', count=1)
+        self.assertContains(resp, 'href="%s"' % reverse('order_create', args=[product.pk]))
         self.assertNotContains(resp, '登录后')
         self.assertNotContains(resp, '/chat')
-        self.assertNotContains(resp, '/orders')
         self.assertNotContains(resp, '/dashboard')
         self.assertNotContains(resp, 'NoReverseMatch')
 
@@ -3050,7 +3051,9 @@ class ProductDetailViewTests(TestCase):
                     self.assertContains(resp, '登录后联系卖家')
                     self.assertNotContains(resp, 'href="#"')
                 else:
-                    self.assertContains(resp, 'href="#"', count=2)
+                    # 4.1 起「立即购买」接真实下单路由，仅「联系卖家」仍是 href="#" 占位。
+                    self.assertContains(resp, 'href="#"', count=1)
+                    self.assertContains(resp, 'href="%s"' % reverse('order_create', args=[product.pk]))
                     self.assertNotContains(resp, '登录后')
 
     # ---------- 只读：POST/PUT/PATCH/DELETE 405、HEAD 200、无任何写入 ----------
@@ -3160,14 +3163,15 @@ class ProductDetailViewTests(TestCase):
             listing.content.decode().count('href="%s"' % self._detail_url(product.pk)), 1
         )
 
-    # ---------- 不改 Epic 3/4/5：详情页无占位页 / 死链（路由缺席属交付时点边界，不做永久守卫）----------
+    # ---------- 不改 Epic 3/5：详情页无占位页 / 死链 ----------
+    # Epic 4 的 /orders/create/<pk>/ 已由 4.1 接通为真实下单路由，不再是死链，故从守卫中移除。
     def test_no_epic3_4_5_dead_links(self):
         product = self._make_product('路由守卫28')
         self._attach_images(product, count=1, prefix='guard')
         self.client.force_login(self.owner)
         resp = self._get(product.pk)
         self.assertEqual(resp.status_code, 200)
-        for dead in ('/chat', '/orders', '/dashboard'):
+        for dead in ('/chat', '/dashboard'):
             self.assertNotContains(resp, dead)
 
     # ---------- 门控唯一性：visible() 是全仓唯一 approved 门控 ----------

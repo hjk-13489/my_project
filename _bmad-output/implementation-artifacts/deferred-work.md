@@ -63,3 +63,9 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-4-订单状态机.md`
   summary: 无「卖家不可购买自己商品」「同一商品不可并行多张非终态订单」约束；`buyer == product.owner` 时 4.7 的「双方互评」语义塌陷。
   evidence: deferred reason — 下单入口属 4.1，约束加在 `Order` 上会扩大 spec-4-4 的 schema 公共表面；属规划层待定规则。
+
+## Deferred from: code review of spec-4-1-下单创建订单 (2026-11-13)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-1-下单创建订单.md`
+  summary: 个人中心「我的订单」恒为空态 — `accounts/views.py:146` 把 `my_orders_empty` 写死为 True，`templates/accounts/profile.html:82` 的 `{% else %}` 分支为空；4.1 后买家已能建单，但离开 `/orders/<id>/` 后没有任何入口能回到订单。
+  evidence: deferred reason — 该空态属 story 1.5 既有实现，4.1 未改；spec-4-1 的 Never 明确把个人中心订单板块与「我的订单」列表留给 4.5。4.5 交付时需同时移除该硬编码常量并补上渲染分支，否则订单列表接通后仍显示空态。

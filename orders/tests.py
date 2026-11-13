@@ -2,9 +2,11 @@ from decimal import Decimal
 from unittest import mock
 
 from django.test import TestCase
+from django.urls import reverse
 
 from accounts.models import User
 from listings.models import Product
+from orders.forms import OrderCreateForm
 from orders.models import InvalidTransition, Order
 
 
@@ -215,3 +217,236 @@ class OrderStateMachineTests(TestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.price, Decimal('30.00'))
+
+
+class OrderCreateViewTests(TestCase):
+    """4.1 下单创建订单：视图层覆盖 I/O 矩阵 13 行，不改动状态机既有 18 例。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2023101', username='卖家', password='test123456'
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2023102', username='买家', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2023103', username='路人', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='九成新',
+            price=Decimal('30.00'), condition='良好', category='教材',
+            status='approved',
+        )
+        cls.pending_product = Product.objects.create(
+            owner=cls.seller, title='待审核商品', description='x',
+            price=Decimal('10.00'), condition='良好', category='教材', status='pending',
+        )
+        cls.rejected_product = Product.objects.create(
+            owner=cls.seller, title='已驳回商品', description='x',
+            price=Decimal('10.00'), condition='良好', category='教材', status='rejected',
+        )
+        cls.offline_product = Product.objects.create(
+            owner=cls.seller, title='已下架商品', description='x',
+            price=Decimal('10.00'), condition='良好', category='教材', status='offline',
+        )
+
+    def _create_url(self, product=None):
+        return reverse('order_create', kwargs={'product_pk': (product or self.product).pk})
+
+    def _detail_url(self, order):
+        return reverse('order_detail', kwargs={'pk': order.pk})
+
+    def _login(self, user):
+        self.client.login(username=user.student_id, password='test123456')
+
+    # 1 确认页
+    def test_confirm_page_get(self):
+        self._login(self.buyer)
+        response = self.client.get(self._create_url())
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.product.title)
+        self.assertContains(response, str(self.product.price))
+        self.assertContains(response, self.seller.username)
+        self.assertContains(response, '确认下单')
+        self.assertContains(response, 'name="message"')
+        self.assertEqual(Order.objects.count(), 0)
+
+    # 2 成功建单 + 302 落点 + 字段归属
+    def test_create_order_success_and_redirect(self):
+        self._login(self.buyer)
+        response = self.client.post(self._create_url(), {'message': '当面交易'})
+        order = Order.objects.get(product=self.product)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(order))
+        self.assertEqual(order.buyer, self.buyer)
+        self.assertEqual(order.product, self.product)
+        self.assertEqual(order.status, 'pending_payment')
+        self.assertEqual(order.price, self.product.price)
+        self.assertEqual(order.message, '当面交易')
+
+    # 3 留言为空
+    def test_empty_message_allowed(self):
+        self._login(self.buyer)
+        response = self.client.post(self._create_url(), {'message': ''})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Order.objects.get(product=self.product).message, '')
+
+    # 4 价格快照（视图级）
+    def test_price_snapshot_after_product_price_change(self):
+        self._login(self.buyer)
+        self.client.post(self._create_url(), {'message': ''})
+        order = Order.objects.get(product=self.product)
+        self.product.price = Decimal('99.00')
+        self.product.save(update_fields=['price'])
+        order.refresh_from_db()
+        self.assertEqual(order.price, Decimal('30.00'))
+
+    # 5 留言超长
+    def test_message_too_long_rejected(self):
+        self._login(self.buyer)
+        response = self.client.post(self._create_url(), {'message': '字' * 501})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertContains(response, '留言不能超过 500 个字符')
+        self.assertIn('message', response.context['form'].errors)
+
+    # 6 不可见商品 GET/POST → 404，无订单
+    def test_invisible_products_404(self):
+        self._login(self.buyer)
+        for product in (self.pending_product, self.rejected_product, self.offline_product):
+            for method in ('get', 'post'):
+                with self.subTest(product=product.title, method=method):
+                    response = getattr(self.client, method)(
+                        self._create_url(product), {'message': ''}
+                    )
+                    self.assertEqual(response.status_code, 404)
+        missing = reverse('order_create', kwargs={'product_pk': 999999})
+        self.assertEqual(self.client.get(missing).status_code, 404)
+        self.assertEqual(self.client.post(missing, {'message': ''}).status_code, 404)
+        self.assertEqual(Order.objects.count(), 0)
+
+    # 7 未登录 GET/POST → 302 到登录页
+    def test_anonymous_redirected_to_login(self):
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    self._create_url(), {'message': ''}
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.url.startswith('/login/'))
+                self.assertIn('next=', response.url)
+        self.assertEqual(Order.objects.count(), 0)
+
+    # 8 非法方法 PUT/DELETE → 405
+    def test_unsafe_methods_405(self):
+        self._login(self.buyer)
+        for method in ('put', 'delete'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._create_url())
+                self.assertEqual(response.status_code, 405)
+        self.assertEqual(Order.objects.count(), 0)
+
+    # 9 卖家自买
+    def test_seller_cannot_buy_own_product(self):
+        self._login(self.seller)
+        response = self.client.post(self._create_url(), {'message': ''})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Order.objects.count(), 0)
+        self.assertContains(response, '不能购买自己发布的商品')
+        self.assertIn(
+            '不能购买自己发布的商品',
+            response.context['form'].non_field_errors(),
+        )
+
+    # 10 重复下单（进行中）
+    def test_duplicate_in_progress_order_rejected(self):
+        self._login(self.buyer)
+        for status in ('pending_payment', 'paid', 'received', 'dispute'):
+            with self.subTest(status=status):
+                Order.objects.all().delete()
+                Order.objects.create(
+                    buyer=self.buyer, product=self.product,
+                    price=self.product.price, status=status,
+                )
+                response = self.client.post(self._create_url(), {'message': ''})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(Order.objects.count(), 1)
+                self.assertContains(response, '该商品已有进行中的订单')
+
+    # 11 已收尾可再下单
+    def test_reorder_allowed_when_only_closed_orders(self):
+        self._login(self.buyer)
+        for status in ('completed', 'reviewed', 'refunded', 'refund_failed'):
+            with self.subTest(status=status):
+                Order.objects.all().delete()
+                Order.objects.create(
+                    buyer=self.buyer, product=self.product,
+                    price=self.product.price, status=status,
+                )
+                response = self.client.post(self._create_url(), {'message': '再下一单'})
+                self.assertEqual(response.status_code, 302)
+                fresh = Order.objects.filter(status='pending_payment')
+                self.assertEqual(fresh.count(), 1)
+                self.assertEqual(fresh.first().buyer, self.buyer)
+
+    # 12 本人订单详情
+    def test_owner_can_view_order_detail(self):
+        self._login(self.buyer)
+        self.client.post(self._create_url(), {'message': '留个言'})
+        order = Order.objects.get(product=self.product)
+        detail = self.client.get(self._detail_url(order))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, self.product.title)
+        self.assertContains(detail, str(order.price))
+        self.assertContains(detail, '留个言')
+        self.assertContains(detail, '待支付')
+
+    # 13 他人订单详情 → 404
+    def test_other_user_order_detail_404(self):
+        self._login(self.buyer)
+        self.client.post(self._create_url(), {'message': ''})
+        order = Order.objects.get(product=self.product)
+        self.client.logout()
+        self._login(self.other)
+        self.assertEqual(self.client.get(self._detail_url(order)).status_code, 404)
+
+    # 服务端推导：price/buyer/product 不得被请求参数篡改
+    def test_server_derived_fields_ignore_forged_post_data(self):
+        self._login(self.buyer)
+        response = self.client.post(self._create_url(), {
+            'message': '照常下单',
+            'price': '0.01',
+            'buyer': self.other.pk,
+            'product': self.pending_product.pk,
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(Order.objects.count(), 1)
+        order = Order.objects.get()
+        self.assertEqual(order.price, self.product.price)
+        self.assertEqual(order.buyer, self.buyer)
+        self.assertEqual(order.product, self.product)
+        self.assertEqual(order.product.status, 'approved')
+        self.assertEqual(list(OrderCreateForm().fields), ['message'])
+
+    # 订单详情 @login_required 回归保护
+    def test_order_detail_anonymous_redirected_to_login(self):
+        order = Order.objects.create(
+            buyer=self.buyer, product=self.product, price=self.product.price,
+        )
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith('/login/'))
+        self.assertIn('next=', response.url)
+
+    # 订单详情 @require_safe 回归保护
+    def test_order_detail_rejects_unsafe_methods(self):
+        self._login(self.buyer)
+        order = Order.objects.create(
+            buyer=self.buyer, product=self.product, price=self.product.price,
+        )
+        url = self._detail_url(order)
+        for method in ('post', 'put', 'delete'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(url)
+                self.assertEqual(response.status_code, 405)
