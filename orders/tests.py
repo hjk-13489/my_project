@@ -123,6 +123,12 @@ class OrderStateMachineTests(TestCase):
         order = self._make_order(status='completed')
         self._assert_rejected(order, 'confirm_receipt')
 
+    def test_mark_reviewed_requires_completed(self):
+        """互评仅限已完成：未收货/未交付的订单不得直接进入「已互评」。"""
+        for status in ('pending_payment', 'paid', 'received'):
+            order = self._make_order(status=status)
+            self._assert_rejected(order, 'mark_reviewed')
+
     def test_dispute_rejects_ordinary_transitions(self):
         """纠纷单只能由管理员裁决，不能支付、收货、互评或重复发起退款。"""
         for method_name in ('pay', 'confirm_receipt', 'mark_reviewed', 'request_refund'):
@@ -175,6 +181,17 @@ class OrderStateMachineTests(TestCase):
                 self._assert_rejected(order, method_name, *args)
 
     # ---------- 字段约定 ----------
+    def test_new_order_defaults_to_pending_payment(self):
+        """不传 status 建单必须落在「待支付」：4.1 的下单视图依赖该默认值。"""
+        order = Order.objects.create(
+            buyer=self.buyer,
+            product=self.product,
+            price=self.product.price,
+        )
+        self.assertEqual(order.status, 'pending_payment')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending_payment')
+
     def test_price_is_snapshot(self):
         """价格是下单时快照：商品改价不影响已有订单。"""
         product = Product.objects.create(

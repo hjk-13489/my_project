@@ -88,6 +88,7 @@ context:
 - `orders/migrations/0001_initial.py` 由 `makemigrations orders` 生成，依赖 `listings.0002_rejectionnotice` 与 swappable user，已应用。
 - `orders/tests.py`：12 个用例覆盖 I/O 矩阵全部 11 行（终态与「裁决前置」用子循环展开），另加价格快照用例；非法转移断言统一经 `refresh_from_db()` 确认库内状态未变。
 - 审查补丁（Step 4）：`_transition()` 改为在 `transaction.atomic()` 内按「库内状态 = 实例内存状态」做条件更新，命中 0 行抛 `InvalidTransition`（陈旧实例不再覆盖并发推进后的状态）；`resolve_refund()` 增加 `bool` 类型闸门；`confirm_receipt()` 两跳仍同事务，第二跳失败整体回滚。测试补 4 例（陈旧实例覆盖、两跳回滚、`dispute` 拒绝普通转移、非布尔裁决），`test_price_is_snapshot` 改用独立商品避免夹具污染，用例数 12 → 16。
+- 复审补丁（第二轮 Step 5）：补 `test_new_order_defaults_to_pending_payment`（不传 `status` 建单必为 `pending_payment`，4.1 的下单视图依赖该默认值）与 `test_mark_reviewed_requires_completed`（`pending_payment` / `paid` / `received` 调 `mark_reviewed()` 均拒绝）；已做变异验证：把 default 改为 `paid`、给 `paid` 增 `reviewed` 出边，两条新用例分别转红。用例数 16 → 18，全量 242 例 OK。
 
 ## Spec Change Log
 
@@ -141,3 +142,30 @@ context:
 - `python manage.py migrate` — 期望：`No migrations to apply`（已应用）。
 - `python manage.py test orders -v 2` — 期望：全部用例 ok。
 - `python manage.py test -v 2` — 期望：全量通过，无失败/跳过。
+
+## Review Findings
+
+复审（第二轮，全四层：Blind Hunter 15 / Edge Case Hunter 2 / Verification Gap 2 / Acceptance Auditor 6，共 25 条 → 18 组）。本轮打补丁前的首轮权威记录见上方 `Review Triage Log`。
+
+- [x] [Review][Patch] 新建订单的默认状态 `pending_payment` 无任何断言，把 default 改成 `paid` 后 16 例仍全绿 [orders/tests.py:33-40, orders/tests.py:189-193]
+- [x] [Review][Patch] `mark_reviewed()` 的非法前置状态（`pending_payment` / `paid` / `received`）无拒绝用例，给 `paid` 补一条到 `reviewed` 的出边仍全绿 [orders/tests.py:62-67, orders/models.py:29]
+
+- [x] [Review][Defer] `epic-4-context.md` 声称卖家 QQ/微信字段由 `accounts` 提供，而 `accounts.User` 实际只有 `student_id` / `is_verified` / `role`，无任何 QQ/微信字段 [accounts/models.py:5-14] — deferred: 规划工件缺口，4.3「下单后展示联系方式」当前**没有数据源**；修复需在 `accounts` 增字段（本故事 Never 明确禁止改 `accounts`），属需人类重协商的规划决策。
+- [x] [Review][Defer] `epic-4-context.md` 要求售出订单按 `product__seller` 过滤，而 `listings.Product` 卖家字段名是 `owner` [listings/models.py:46-49] — deferred: 上下文文档编译时未与代码核对，4.5 照抄会在 `FieldError` 处炸；修复=编辑规划工件。
+- [x] [Review][Defer] `refund_failed` 为终态且无出边，管理员驳回退款后订单永久卡死（既不可 `confirm_receipt()` 也不可再 `request_refund()` / `mark_reviewed()`） [orders/models.py:31-33] — deferred: 转移表由冻结区 Decision 与 Implementation Notes 明确写死（「其余终态无出边」），缺口在 Epic 4 的需求层，需规划层补一条「驳回退款后订单何去何从」的规则。
+- [x] [Review][Defer] 无「卖家不可购买自己商品」「同一商品不可并行多张非终态订单」约束；`buyer == product.owner` 时 4.7 的「双方互评」语义塌陷 [orders/models.py:36-48] — deferred: 下单入口属 4.1，约束加在 `Order` 上会扩大本故事 schema 公共表面；属规划层待定规则。
+
+**Rejected（12 组）：**
+
+- `false` — `mark_reviewed()` 不校验评价是否齐备：冻结区 Never 明文「不实现 `Review`/`RefundRequest` 与「双方均提交」判定（属 4.7 / 4.8）；`mark_reviewed()` 只提供转移入口」，本故事边界即如此。
+- `false` — `received` 经公开方法不可持久化却出现在 epic 的进度状态里：Decision ② 与 Always 明文要求 `confirm_receipt()` 在单事务内两跳，与本故事已批准实现一致（同首轮 #1）。
+- `low` — `_transition()` 对未保存实例（`pk=None`）抛「订单当前状态已被其他操作变更」这一误导性消息（实测成立，`filter(pk=None)` 生成 `id IS NULL`）；但需调用方在 save 前调转移方法，无此调用路径，修法是新增 `pk is None` 分支，超出直接修正。
+- `low` — `confirm_receipt()` 第二跳失败回滚后内存 `self.status` 残留为 `received`（与库内 `paid` 分叉），同实例重试会得到误导性错误；但条件更新下第二跳 0 行在 SQLite 单写者事务内不可达，仅在其他未预见的异常下成立，修法需加 try/except 守卫。
+- `low` — `resolve_refund()` 的非布尔闸门排在状态校验之前，故「终态 + 非布尔入参」得 `ValueError` 而非 `InvalidTransition`；I/O 矩阵「裁决前置」行只承诺 `resolve_refund(True/False)`，该组合不被规格覆盖，且拒绝后状态不变，属开发者专用错误类型的措辞偏好。
+- `low` — `_transition()` 用 `filter().update()` 而非冻结区写的 `save(update_fields=[...])`：当前无 `post_save` 信号与 `save()` 钩子，`updated_at` 亦被显式赋值，无可观测坏结果；且条件更新正是首轮 #3/#22/#26 批准的修法，剩余分歧在冻结区措辞，修复=编辑受审 spec。
+- `low` — 状态流转无留痕（`received` 时间戳被立即覆盖、裁决人不记录）：新增字段会扩大 schema 公共表面，Epic 5 统计口径尚未提出。
+- `low` — AC 第二句的串行语义（`pay()` 被拒后同一实例继续 `confirm_receipt()`）未被单条用例守护：两半行为分别由 `test_pay_twice_rejected` 与 `test_normal_path_pay_then_confirm_receipt` 覆盖，拒绝路径不改内存与库内状态，链路行为由构造保证。
+- 修复=编辑受审 spec — `Review Triage Log` 收尾统计与表内裁决不符（表内实为 6 条 `false`、14 条 `low`、7 条 `medium`，正文写「10 条 false、11 条 low → rejected」并称「21 驳回」）。
+- 修复=编辑受审 spec — `Implementation Notes` 前段仍写「12 个用例」，末段写「12 → 16」，而 `orders/tests.py` 实为 16 个测试方法。
+- 修复=编辑受审 spec — frontmatter `status: 'done'` 与同 diff 内 `sprint-status.yaml` 的 `review` 并存，`## Spec Change Log` 为空标题。
+- 修复=编辑受审 spec — `## Verification` 只列命令与期望、无实跑输出，且写裸 `python`（本仓库需 `.venv/Scripts/python.exe`）。

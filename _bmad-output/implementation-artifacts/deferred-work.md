@@ -45,3 +45,21 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-2-8-商品详情页.md`
   summary: 详情页非安全方法在真实部署下返回 403 而非 AC 要求的 405（`Allow: GET, HEAD`） — `@require_safe` 在 `CsrfViewMiddleware.process_view` 之后执行，实测 `Client(enforce_csrf_checks=True)` 的 POST/PUT/PATCH/DELETE 全部 403 且无 `Allow` 头；只有未启用 CSRF 校验的默认测试客户端才得 405。
   evidence: deferred reason — 既有 `/listings/` 等全部 `@require_safe` 页面同一行为（项目级 Django 中间件顺序既定事实），两种情况下均无写入、不改 `status`，AC 的只读意图成立；修正需调整 config 级中间件或绕开 CSRF，超出 2.8 边界。
+
+## Deferred from: code review of spec-4-4-订单状态机 (2026-11-13)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-4-订单状态机.md`
+  summary: `epic-4-context.md` 声称卖家 QQ/微信字段由 `accounts` 提供，而 `accounts.User`（`accounts/models.py:5-14`）只有 `student_id` / `is_verified` / `role`，无任何 QQ/微信字段 — 4.3「下单后展示联系方式」当前没有数据源。
+  evidence: deferred reason — 规划工件缺口；修复需在 `accounts` 增字段，而 spec-4-4 的 Never 明确禁止改 `accounts`，属需人类重协商的规划决策，须在 4.3 开工前解决。
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-4-订单状态机.md`
+  summary: `epic-4-context.md` 要求售出订单按 `product__seller` 过滤，而 `listings.Product` 的卖家字段名是 `owner`（`listings/models.py:46-49`） — 4.5 照抄会触发 `FieldError`。
+  evidence: deferred reason — 上下文文档编译时未与代码核对，修复=编辑规划工件，非代码缺陷。
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-4-订单状态机.md`
+  summary: `refund_failed` 为终态且无出边，管理员驳回退款后订单永久卡死 — 既不能 `confirm_receipt()`（只接受 `paid`），也不能再 `request_refund()`，更不能 `mark_reviewed()`，买卖双方无法收尾。
+  evidence: deferred reason — 转移表由 spec-4-4 冻结区 Decision 与 Implementation Notes 明确写死（「其余终态无出边」），缺口在 Epic 4 需求层，需规划层补一条「驳回退款后订单何去何从」的规则。
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-4-订单状态机.md`
+  summary: 无「卖家不可购买自己商品」「同一商品不可并行多张非终态订单」约束；`buyer == product.owner` 时 4.7 的「双方互评」语义塌陷。
+  evidence: deferred reason — 下单入口属 4.1，约束加在 `Order` 上会扩大 spec-4-4 的 schema 公共表面；属规划层待定规则。
