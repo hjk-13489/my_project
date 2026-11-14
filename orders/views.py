@@ -1,12 +1,12 @@
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect, render
-from django.views.decorators.http import require_http_methods, require_safe
+from django.views.decorators.http import require_POST, require_http_methods, require_safe
 
 from listings.models import Product
 
 from .forms import OrderCreateForm
-from .models import Order
+from .models import InvalidTransition, Order
 
 # 已收尾状态：这些状态不再占用「同一买家 + 同一商品」的下单名额。
 CLOSED_STATUSES = ('completed', 'reviewed', 'refunded', 'refund_failed')
@@ -62,3 +62,26 @@ def order_detail(request, pk):
     """最小订单详情页：仅 buyer 本人可见，展示商品/价格/留言/当前状态。"""
     order = get_object_or_404(Order, pk=pk, buyer=request.user)
     return render(request, 'orders/order_detail.html', {'order': order})
+
+
+# 模拟支付：仅 POST、仅 buyer 本人。@login_required 外层使匿名请求先跳登录页
+# 而非落到 405；@require_POST 内层把 GET/PUT/DELETE 一律挡成 405。
+@login_required
+@require_POST
+def order_pay(request, pk):
+    """模拟支付：在单个事务内经 Order.pay() 完成 pending_payment → paid。
+
+    取订单与 pay() 置于同一事务，使读取与流转构成不可分割的动作；并发重复
+    提交由 _transition() 的条件更新兜底。非法/重复/陈旧实例流转抛
+    InvalidTransition，以 200 重渲染详情页并给出 alert-danger 中文拒绝提示；
+    成功则 PRG 回详情页，由状态徽章呈现结果。
+    """
+    try:
+        with transaction.atomic():
+            order = get_object_or_404(Order, pk=pk, buyer=request.user)
+            order.pay()
+    except InvalidTransition:
+        return render(request, 'orders/order_detail.html',
+                      {'order': order,
+                       'pay_error': '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试'})
+    return redirect('order_detail', pk=pk)

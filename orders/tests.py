@@ -450,3 +450,240 @@ class OrderCreateViewTests(TestCase):
             with self.subTest(method=method):
                 response = getattr(self.client, method)(url)
                 self.assertEqual(response.status_code, 405)
+
+
+class OrderPayViewTests(TestCase):
+    """4.2 模拟支付：视图层覆盖 I/O 矩阵全部 10 行，不改动既有 34 例。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2023201', username='卖家', password='test123456'
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2023202', username='买家', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2023203', username='路人', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材',
+            status='approved',
+        )
+
+    # ---------- helpers ----------
+    def _make_order(self, status='pending_payment'):
+        return Order.objects.create(
+            buyer=self.buyer,
+            product=self.product,
+            price=self.product.price,
+            status=status,
+        )
+
+    def _pay_url(self, order):
+        return reverse('order_pay', kwargs={'pk': order.pk})
+
+    def _detail_url(self, order):
+        return reverse('order_detail', kwargs={'pk': order.pk})
+
+    def _login(self, user):
+        self.client.login(username=user.student_id, password='test123456')
+
+    # 1 正常支付：成功流转且 DB 重读、302 落点、徽章与按钮
+    def test_pay_success_transitions_and_redirects(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        order.refresh_from_db()
+        before = order.updated_at
+
+        response = self.client.post(self._pay_url(order))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertGreater(order.updated_at, before)
+        self.assertEqual(Order.objects.count(), 1)  # 不新增订单/支付流水
+
+        detail = self.client.get(self._detail_url(order))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, '已支付/待交付')
+        self.assertNotContains(detail, '模拟支付')
+        self.assertNotContains(detail, self._pay_url(order))
+
+    # 2 按钮门控：仅 pending_payment 渲染支付表单，其余状态只显示徽章
+    def test_pay_button_only_shown_when_pending_payment(self):
+        self._login(self.buyer)
+        pending = self._make_order(status='pending_payment')
+        detail = self.client.get(self._detail_url(pending))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, self._pay_url(pending))
+        self.assertContains(detail, '模拟支付')
+        self.assertContains(detail, 'csrfmiddlewaretoken')
+
+        for status in ('paid', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            with self.subTest(status=status):
+                detail = self.client.get(self._detail_url(order))
+                self.assertEqual(detail.status_code, 200)
+                self.assertNotContains(detail, self._pay_url(order))
+                self.assertNotContains(detail, '模拟支付')
+                self.assertContains(detail, order.get_status_display())
+
+    # 2b 表单以 POST 提交并走通支付：method/action 正确，提交后 302 且状态流转
+    def test_pay_form_is_post_and_completes_payment(self):
+        order = self._make_order(status='pending_payment')
+        self._login(self.buyer)
+
+        detail = self.client.get(self._detail_url(order))
+        self.assertEqual(detail.status_code, 200)
+        # 合并断言：支付表单确为 POST 且 action 指向 order_pay
+        # （合并可避免被导航栏登出表单的 method="post" 误命中）
+        self.assertContains(
+            detail,
+            '<form method="post" action="%s"' % self._pay_url(order),
+        )
+
+        # 按该 action 提交，走通支付
+        response = self.client.post(self._pay_url(order))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+
+    # 3 非法方法：已登录 GET/PUT/DELETE → 405，状态不变
+    def test_non_post_methods_405(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        for method in ('get', 'put', 'delete'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._pay_url(order))
+                self.assertEqual(response.status_code, 405)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending_payment')
+
+    # 4 未登录：匿名 GET/POST 一律 302 到登录页（带 next），状态不变
+    def test_anonymous_redirected_to_login(self):
+        order = self._make_order()
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._pay_url(order))
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.url.startswith('/login/'))
+                self.assertIn('next=', response.url)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending_payment')
+
+    # 5 他人订单：非 buyer POST → 404，状态不变
+    def test_other_user_order_404(self):
+        order = self._make_order()
+        self._login(self.other)
+        response = self.client.post(self._pay_url(order))
+        self.assertEqual(response.status_code, 404)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'pending_payment')
+
+    # 6 不存在订单：不存在的 pk → 404
+    def test_nonexistent_order_404(self):
+        self._login(self.buyer)
+        url = reverse('order_pay', kwargs={'pk': 999999})
+        self.assertEqual(self.client.post(url).status_code, 404)
+
+    # 7 重复支付：非待支付/终态 POST → 200 重渲染 + 可见错误条，
+    #    状态与 updated_at 均不变，且不渲染支付表单
+    def test_duplicate_pay_rejected_with_error_bar(self):
+        self._login(self.buyer)
+        for status in ('paid', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            order.refresh_from_db()
+            before = order.updated_at
+            with self.subTest(status=status):
+                response = self.client.post(self._pay_url(order))
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'alert-danger')
+                self.assertContains(response, '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试')
+                self.assertIn('pay_error', response.context)
+                self.assertContains(response, order.get_status_display())
+                self.assertNotContains(response, self._pay_url(order))
+                order.refresh_from_db()
+                self.assertEqual(order.status, status)
+                self.assertEqual(order.updated_at, before)
+
+    # 8a 连续两次提交：恰好一次流转到 paid，第二次被状态机拒绝且可见
+    def test_double_submit_transitions_only_once(self):
+        order = self._make_order(status='pending_payment')
+        self._login(self.buyer)
+        first = self.client.post(self._pay_url(order))
+        self.assertEqual(first.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        before = order.updated_at
+
+        second = self.client.post(self._pay_url(order))
+
+        self.assertEqual(second.status_code, 200)
+        self.assertContains(second, 'alert-danger')
+        self.assertContains(second, '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertEqual(order.updated_at, before)
+
+    # 8b 并发/陈旧实例：取到「待支付」实例后库内已被并发推进，
+    #     条件更新挡住二次流转，给可见拒绝提示
+    def test_concurrent_stale_instance_rejected_visibly(self):
+        order = self._make_order(status='pending_payment')
+        self._login(self.buyer)
+        # 模拟并发请求先把库内状态推进到 paid（不影响内存中 order 的 status）
+        Order.objects.filter(pk=order.pk).update(status='paid')
+
+        def stale_lookup(model, *args, **kwargs):
+            return order  # 陈旧实例：status 仍为 pending_payment
+
+        with mock.patch('orders.views.get_object_or_404', side_effect=stale_lookup):
+            response = self.client.post(self._pay_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'alert-danger')
+        self.assertContains(response, '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试')
+        self.assertNotContains(response, self._pay_url(order))
+        self.assertIn('pay_error', response.context)
+        # 恰好一次流转：库内保持 paid，陈旧实例未能二次改写
+        self.assertEqual(Order.objects.get(pk=order.pk).status, 'paid')
+
+    # 9 伪造字段：POST 携带 status/price/buyer/product 全部被忽略，仅 pay() 流转
+    def test_forged_post_fields_ignored(self):
+        order = self._make_order(status='pending_payment')
+        self._login(self.buyer)
+        response = self.client.post(self._pay_url(order), {
+            'status': 'paid',
+            'price': '0.01',
+            'buyer': self.other.pk,
+            'product': 999999,
+        })
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertEqual(order.price, self.product.price)
+        self.assertEqual(order.buyer, self.buyer)
+        self.assertEqual(order.product, self.product)
+
+    # 10 支付后商品改价/下架：订单 price 与 status 均不变
+    def test_product_price_change_after_pay_does_not_affect_order(self):
+        order = self._make_order(status='pending_payment')
+        self._login(self.buyer)
+        self.client.post(self._pay_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        before_price = order.price
+        before_status = order.status
+
+        self.product.price = Decimal('999.00')
+        self.product.status = 'offline'
+        self.product.save(update_fields=['price', 'status'])
+
+        order.refresh_from_db()
+        self.assertEqual(order.price, before_price)
+        self.assertEqual(order.status, before_status)

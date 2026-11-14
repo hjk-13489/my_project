@@ -17,7 +17,18 @@
             </div>
         </div>
 
-        {# 4.2 模拟支付入口预留挂点：待支付订单后续在此加入支付按钮。 #}
+        {% if pay_error %}
+            <div class="alert alert-danger mt-3" role="alert">{{ pay_error }}</div>
+        {% endif %}
+
+        {% if order.status == 'pending_payment' and not pay_error %}
+            <form method="post" action="{% url 'order_pay' order.pk %}" class="mt-3">
+                {% csrf_token %}
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success">模拟支付</button>
+                </div>
+            </form>
+        {% endif %}
 
         <p class="mt-3 text-center">
             <a href="{% url 'product_detail' order.product.pk %}">返回商品详情</a>
