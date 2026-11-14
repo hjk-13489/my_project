@@ -604,7 +604,7 @@ class OrderPayViewTests(TestCase):
                 response = self.client.post(self._pay_url(order))
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(response, 'alert-danger')
-                self.assertContains(response, '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试')
+                self.assertContains(response, '支付被拒绝：订单当前状态不允许支付，请勿重复提交；当前状态以上方状态徽章为准')
                 self.assertIn('pay_error', response.context)
                 self.assertContains(response, order.get_status_display())
                 self.assertNotContains(response, self._pay_url(order))
@@ -626,7 +626,7 @@ class OrderPayViewTests(TestCase):
 
         self.assertEqual(second.status_code, 200)
         self.assertContains(second, 'alert-danger')
-        self.assertContains(second, '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试')
+        self.assertContains(second, '支付被拒绝：订单当前状态不允许支付，请勿重复提交；当前状态以上方状态徽章为准')
         order.refresh_from_db()
         self.assertEqual(order.status, 'paid')
         self.assertEqual(order.updated_at, before)
@@ -647,7 +647,7 @@ class OrderPayViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'alert-danger')
-        self.assertContains(response, '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试')
+        self.assertContains(response, '支付被拒绝：订单当前状态不允许支付，请勿重复提交；当前状态以上方状态徽章为准')
         self.assertNotContains(response, self._pay_url(order))
         self.assertIn('pay_error', response.context)
         # 恰好一次流转：库内保持 paid，陈旧实例未能二次改写

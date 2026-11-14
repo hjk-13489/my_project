@@ -82,6 +82,21 @@ context:
 - Given 任意非 `pending_payment` 状态、越权或未登录请求，when 发起支付，then 订单状态与 `updated_at` 均不变，且不产生任何支付流水、迁移或外部调用。
 - Given 本轮改动，when 跑全量测试，then 既有 258 例与新增用例全绿、`makemigrations --check --dry-run` 报 No changes detected，`orders/models.py` 与 `orders/migrations/` 的 diff 为空。
 
+### Review Findings
+
+> 第二轮 code review（2026-11-14，`review_mode=full`，启用 2 层：Edge Case Hunter + Acceptance Auditor；团队精简配置禁用 Blind Hunter / Verification Gap）。9 条发现逐条核验后：2 组 `patch`、5 条驳回（1 `false` + 4 `low`），无 `decision-needed` / `defer`。
+
+- [x] [Review][Patch] 拒绝页状态徽章显示陈旧「待支付」——`except InvalidTransition` 直接复用内存实例渲染，未 `refresh_from_db()`；并发/陈旧实例被拒时库内已 `paid` 而模板第 15 行仍渲染 `pending_payment`，与 `alert-danger` 错误条同页冲突，买家可能误判订单仍待支付 [orders/views.py:83-86]
+- [x] [Review][Patch] `pay_error` 文案「请刷新页面确认后重试」与 200 重渲染的实际行为不符——刷新会重放 POST 而非 GET 详情页，且已 `paid` 订单的支付按钮已因 `and not pay_error` 门控消失；文案应明确「拒绝／请勿重复提交」 [orders/views.py:86]
+
+#### Rejected
+
+- `false` — spec `status: done` vs sprint `review` 属流程中间态：Step 6 统一同步 sprint 状态，首轮 Triage #10 同一情形已裁 false，非变更集缺陷。
+- `low` — CSRF 开启时无/失效 token 的请求得 403 而非矩阵承诺的 302/405：项目级既有行为（`deferred-work.md:46` 已就 2.8 登记），表单带 `{% csrf_token %}` 不影响正常买家；修复需改 config 级中间件或编辑本规格的矩阵前提，非直接修正。
+- `low` — 刷新 200 拒绝页会重放 POST、停在错误页：Q1=A 冻结决策明确要求「以 200 重渲染」且禁用 session/query 传参与 messages（`base.html` 未渲染）；重放不产生状态变更或外部副作用，页面提供「返回商品详情」出口；修复需重协商 frozen Intent 并新增状态传递机制。
+- `low` — 并发双击仅由顺序双击 + `mock.patch` 陈旧实例覆盖，无真实并发请求：实现侧 `transaction.atomic()` + `_transition()` 条件更新本身正确，Implementation Notes 已披露测试替身性质；补真实多进程压测超出范围（SQLite 演示环境无法可靠构造），改矩阵措辞需编辑本规格。
+- `low` — AC1「全仓检索 `status` 赋值」字面与新增测试夹具（`update(status='paid')`、`product.status = 'offline'`）冲突：Verification 命令已把检索限定到 `-- orders/views.py` 并注明夹具不在范围，视图与模板确无 `status` 赋值；修复需编辑本规格。
+
 ## Implementation Notes
 
 - 4 条 Execution 全部完成：`orders/urls.py` 追加 `order_pay` 路由；`orders/views.py` 新增 `order_pay` 视图（新增 `require_POST` / `InvalidTransition` 两个 import）；`templates/orders/order_detail.html:20` 挂点换成 `alert-danger` 错误条与仅 `pending_payment` 可见的 POST 表单；`orders/tests.py` 追加 `OrderPayViewTests` 11 例（I/O 矩阵 10 行逐行覆盖，并发行配 2 例）。既有 34 例、`orders/models.py`、迁移、`base.html`、`config/urls.py`、`listings` / `accounts` 均未改动。
@@ -89,6 +104,8 @@ context:
 - 主代理独立实跑（未采信实现子代理报告）：`check` → 0 issues；`makemigrations --check --dry-run` → No changes detected；`test orders --verbosity=2` → 45 例逐例 `ok`（34 既有 + 11 新增，全部 ran & passed）；全量 `test` → 269 例 OK（258 基线 + 11 新增）；`git grep -nE "status[[:space:]]*=" -- orders/views.py` → 无输出；`git diff --stat <baseline> -- orders/models.py orders/migrations/` → 空。
 - 已知取舍：错误分支沿用骨架直接把 `order` 实例传给模板，并发／陈旧实例被拒时徽章可能短暂显示陈旧状态，但错误条明确可见且库内状态不变；并发用例以 `mock.patch` 返回陈旧实例触发 `_transition()` 条件更新兜底，属测试替身而非真实多进程压测。
 - 首轮审查补丁（Step 4，3 组 `patch`）：`templates/orders/order_detail.html` 表单门控加 `and not pay_error`，拒绝页不再重现支付按钮；`orders/views.py` 的 `pay_error` 改为固定买家可读中文拒绝语（不再透传状态机异常原文）；`orders/tests.py` 同步 3 处文案断言、给陈旧实例用例补 `assertNotContains(pay_url)`、新增 `test_pay_form_is_post_and_completes_payment` 钉住表单 `method="post"` 与按 action 走通支付。主代理复跑：`check` 0 issues、`makemigrations --check --dry-run` No changes detected、`test orders --verbosity=2` 46 例逐例 `ok`、全量 `test` 270 例 OK、视图无 `status=` 赋值、受保护文件 diff 为空；另有 4 条 `false` 与 7 条 `low` 驳回，无 loopback。
+
+- 第二轮审查补丁（Step 4，2 组 `patch`，`review_mode=full` 两层）：`orders/views.py` 的 `except InvalidTransition` 分支在重渲染前调用 `order.refresh_from_db()`，使并发／陈旧实例被拒时状态徽章与库内一致；`pay_error` 改为固定中文拒绝语「支付被拒绝：订单当前状态不允许支付，请勿重复提交；当前状态以上方状态徽章为准」，消除「请刷新页面确认后重试」与 200 重渲染／刷新重放 POST 的误导；`orders/tests.py` 同步 3 处文案断言。主代理实跑：`check` 0 issues、`makemigrations --check --dry-run` No changes detected、`test orders` 46 例 OK、全量 `test` 270 例 OK、视图无 `status=` 赋值、受保护文件 diff 为空。原「已知取舍」中关于徽章陈旧状态的说明已由本轮补丁消解。
 
 ## Spec Change Log
 

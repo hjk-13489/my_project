@@ -81,7 +81,11 @@ def order_pay(request, pk):
             order = get_object_or_404(Order, pk=pk, buyer=request.user)
             order.pay()
     except InvalidTransition:
+        # _transition() 在「条件更新命中 0 行」时抛错且未改写 self.status；
+        # 并发/陈旧实例被拒时库内状态可能已被推进，重读后再渲染，
+        # 避免状态徽章仍显示陈旧的「待支付」。
+        order.refresh_from_db()
         return render(request, 'orders/order_detail.html',
                       {'order': order,
-                       'pay_error': '支付未成功：订单当前状态不允许支付，请刷新页面确认后重试'})
+                       'pay_error': '支付被拒绝：订单当前状态不允许支付，请勿重复提交；当前状态以上方状态徽章为准'})
     return redirect('order_detail', pk=pk)
