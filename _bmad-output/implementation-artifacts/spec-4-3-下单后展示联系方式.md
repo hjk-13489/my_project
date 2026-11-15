@@ -84,6 +84,19 @@ context:
 - Given 任何状态与访问者，when 检查所有页面 HTML，then 均不出现卖家 `student_id`、`VerificationRequest.name` 或「学号 (昵称)」形态；越权与匿名请求分别得 404 / 302，不泄露任何联系方式。
 - Given 本轮改动，when 跑全量测试与检查，then 既有基线（全量 270 例、`orders` 46 例）与新增用例全绿、`check` 0 issues、`makemigrations --check --dry-run` 报 No changes detected，且 `orders/models.py`、`orders/migrations/`、`orders/views.py`、`accounts/admin.py`、`accounts/forms.py`、`templates/listings/` 的 diff 为空。
 
+### Review Findings
+
+本轮（2026-11-15 17:08，code-review 工作流重跑；活跃层 Edge Case Hunter + Acceptance Auditor，2 层均成功产出，无失败层）共 6 条 findings，逐条核验后 0 条幸存：0 `decision-needed` / 0 `patch` / 0 `defer` / 6 rejected。`review_loop_iteration` 保持 0，无 loopback。审查 diff 源为 `9e1ec658..HEAD`（8 files / +429 −2 / 505 行）。
+
+**Rejected**
+
+- [EC] 未知/无效订单状态下 `!= 'pending_payment'` 门控会泄露卖家联系方式，建议改为枚举 7 个有效状态的 `is_paid_or_later` property — `false`：生产代码写 `status` 的唯一通道是 `orders/models.py` 的 `_transition()`（:116 条件更新 / :124 实例赋值），`target` 仅来自 5 个转移方法的 8 个合法枚举值；`orders/views.py:40` 建单不带 status、走 `default='pending_payment'`，全仓 `orders` 生产代码（排除 tests / migrations）无其它赋值点，未知状态不可达；即便出现，`ALLOWED_TRANSITIONS.get(unknown, ())` 返回空元组会立即抛 `InvalidTransition`（显式失败而非静默渲染）。规格 Always 与 Design Notes 明确要求 `!= 'pending_payment'` 语义（`stories.md:204` 断言 `seller_contact_visible(order) == (order.status != '待支付')`），改成枚举 property 反违反 Never「不改 `orders/models.py`」与「模板只是读取判断，不构成状态机分叉」。
+- [EC] 卖家昵称为空或 owner 链失效时只剩裸「卖家：」标签、无中文占位 — `false`：规格的中文占位要求只针对联系方式值（`qq` / `wechat`），二者已有 `卖家未填写` 占位且由 `test_empty_contact_values_show_placeholder` 覆盖；昵称按 Execution 明确原样渲染，非联系方式值。`RegisterForm.Meta.fields` 含 `username`，ModelForm 基于 `AbstractUser.username(blank=False)` 设为必填并配置 `required` 报错，正常路径不为空；`Product.owner` 为非空 FK（CASCADE）、`Order.product` 为 PROTECT，链不会断。审查者未给出可达路径；即便昵称为空，QQ/微信与占位仍正常渲染，无泄露、无异常。
+- [EC] `qq` / `wechat` 为纯空白时 truthy、不显示占位，买家看到空白值 — `low` → rejected：技术上成立（whitespace-only 为真值，模板输出空格）。但 Q2=A 明确不提供任何用户自助填写入口，值只能由 `manage.py shell` 预置，日常使用不会遇到；规格矩阵「字段未填」定义为空字符串且已有用例覆盖；修复需新增 `.strip` 模板分支（增加 guard/branch 复杂度）并偏离 Execution 明确的渲染方式，不值得修。
+- [AA] diff 新增/改动 `.workbuddy/memory/2026-11-15.md`、本 spec、`sprint-status.yaml` 三文件，落在冻结区 Never 白名单之外 — `false`：白名单约束的是实现改动，三者均为 BMAD 工作流自身产物、由流程管理，不影响应用行为；AC3 的 diff-empty 检查只列受保护代码文件且已满足（与既有 Triage #13 同款裁决）。memory 自述「7 files / +416 -2」是实现提交 `160a1e4` 的统计，memory 文件本身在后续 `0e5c77d` 单独提交，并非矛盾。未产生任何功能性坏结果；修复需编辑本规格 → 按硬规则驳回。
+- [AA] 声称「覆盖 I/O 矩阵全部 9 行」，但第 4 行「`refresh_from_db()` 后仍 `pending_payment` 则不展示」分支无用例 — `low` → rejected：事实成立（唯一相关用例只测库内已 `paid`）。但核验 `order_pay` 的两条 `InvalidTransition` 路径：① `target not in allowed`（实例状态非 `pending_payment`，实例来自 DB）；② 条件更新命中 0 行（库内状态已被其他操作推进），二者在 `refresh_from_db()` 后库内状态必非 `pending_payment`；`ALLOWED_TRANSITIONS` 无任何回退到 `pending_payment` 的转移，故该分支不可达。`pending_payment` 隐藏行为已由用例 1 与用例 9 覆盖。仅措辞偏宽，修复需编辑本规格 → 驳回（与既有 Triage #9 一致）。
+- [AA] 状态声明三处矛盾（spec `done` / memory「已完成」/ sprint `review`），且与 Triage #4「spec 已置 `in-review`」不符 — `false`：三者属不同维度——spec frontmatter 描述规格自身生命周期、memory 是工作日志叙述、sprint `review` 是追踪状态；`sprint-status.yaml:29` 注释明确「Dev moves story to 'review', then runs code-review」，`review` 正是本次审查的入口条件，符合预期。Triage #4 的「已置 in-review」是历史日志中的措辞误差，非当前状态字段；历史审查结论为 append-only 记录，本次两层仍独立产出 6 条 findings，未被阻止。无功能性坏结果；修复需编辑本规格 → 驳回。
+
 ## Implementation Notes
 
 - 实现交付（子代理，diff 已由主代理逐行核对）：`accounts/models.py:12-14` 增加 `qq` / `wechat`；`accounts/migrations/0003_user_qq_user_wechat.py` 由 `makemigrations accounts` 生成（两个 `AddField`，依赖 `0002`）；`templates/orders/order_detail.html:20-40` 以 `{% if order.status != 'pending_payment' %}` 为唯一门控渲染卖家昵称 / QQ / 微信 / `is_verified` 双徽章，空值给 `text-muted` 中文占位，插在状态卡之后、`alert-danger` 之前；`deferred-work.md` 追加 Q2=A 的 deferred 条目。冻结区未改动。
