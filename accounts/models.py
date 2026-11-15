@@ -9,6 +9,9 @@ class User(AbstractUser):
         max_length=16, choices=[('student', '学生'), ('admin', '管理员')],
         default='student', verbose_name='角色'
     )
+    # 卖家联系方式：4.3 的唯一数据源，仅支付后由订单详情页按状态门控渲染。
+    qq = models.CharField(max_length=64, blank=True, default='', verbose_name='QQ号')
+    wechat = models.CharField(max_length=64, blank=True, default='', verbose_name='微信号')
     USERNAME_FIELD = 'student_id'
     REQUIRED_FIELDS = ['username']  # username 复用为昵称
 

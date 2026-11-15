@@ -69,3 +69,9 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-1-下单创建订单.md`
   summary: 个人中心「我的订单」恒为空态 — `accounts/views.py:146` 把 `my_orders_empty` 写死为 True，`templates/accounts/profile.html:82` 的 `{% else %}` 分支为空；4.1 后买家已能建单，但离开 `/orders/<id>/` 后没有任何入口能回到订单。
   evidence: deferred reason — 该空态属 story 1.5 既有实现，4.1 未改；spec-4-1 的 Never 明确把个人中心订单板块与「我的订单」列表留给 4.5。4.5 交付时需同时移除该硬编码常量并补上渲染分支，否则订单列表接通后仍显示空态。
+
+## Deferred from: spec-4-3-下单后展示联系方式 (2026-11-15, 人类决策 Q2=A)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-3-下单后展示联系方式.md`
+  summary: 普通用户自助填写 QQ/微信的入口 — 4.3 仅在 `accounts.User` 提供 `qq` / `wechat` 两个可选字段作为唯一数据源，并按订单状态在详情页渲染 + 门控；不提供任何注册、个人中心资料编辑、表单、视图或模板让用户自行维护这两个字段。演示联系方式由 `manage.py shell` 用 `User.objects.filter(student_id=...).update(qq=..., wechat=...)` 预置。
+  evidence: 人类决策 Q2=A（2026-11-15）：4.3 范围明确收窄为「按状态渲染 + 门控」，自助填写入口登记为 deferred work。`accounts/admin.py` 的 `fieldsets` / `add_fieldsets` 显式列字段且按 spec-4-3 的 Never 不改，新字段不会自动出现在 admin 编辑页；`accounts/forms.py` 的 `RegisterForm.Meta.fields` 亦显式为 `['student_id', 'username']`，新字段不会进入注册表单。自助填写入口需后续故事（建议与个人中心资料编辑一并设计）补上。

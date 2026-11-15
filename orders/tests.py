@@ -687,3 +687,209 @@ class OrderPayViewTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.price, before_price)
         self.assertEqual(order.status, before_status)
+
+
+class OrderContactViewTests(TestCase):
+    """4.3 下单后展示联系方式：按订单状态门控，覆盖 I/O 矩阵全部 9 行。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2023301', username='卖家昵称', password='test123456',
+            qq='88001234567', wechat='wx_seller_4_3',
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2023302', username='买家', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2023303', username='路人', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材',
+            status='approved',
+        )
+
+    # ---------- helpers ----------
+    def _make_order(self, status='pending_payment'):
+        return Order.objects.create(
+            buyer=self.buyer, product=self.product,
+            price=self.product.price, status=status,
+        )
+
+    def _detail_url(self, order):
+        return reverse('order_detail', kwargs={'pk': order.pk})
+
+    def _pay_url(self, order):
+        return reverse('order_pay', kwargs={'pk': order.pk})
+
+    def _login(self, user):
+        self.client.login(username=user.student_id, password='test123456')
+
+    # 1 待支付：整个联系方式区块、值与认证徽章均不输出，支付按钮仍在
+    def test_pending_payment_hides_contact_block_and_badge(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '卖家联系方式')
+        self.assertNotContains(response, 'QQ')
+        self.assertNotContains(response, '微信')
+        self.assertNotContains(response, self.seller.qq)
+        self.assertNotContains(response, self.seller.wechat)
+        # base.html 导航栏会为当前登录用户渲染认证徽章，故用联系方式区块
+        # 独有的锚点判定，避免把全局导航徽章误当作卖家认证徽章。
+        self.assertNotContains(response, self.seller.username)
+        self.assertNotContains(response, 'QQ：')
+        self.assertNotContains(response, '微信：')
+        self.assertContains(response, self._pay_url(order))
+        self.assertContains(response, '模拟支付')
+
+    # 2 已支付：展示 QQ/微信 + 认证状态，支付按钮消失
+    def test_paid_order_shows_contact_and_verification_badge(self):
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '卖家联系方式')
+        self.assertContains(response, self.seller.username)
+        self.assertContains(response, self.seller.qq)
+        self.assertContains(response, self.seller.wechat)
+        seller_line = response.content.decode().split('卖家：', 1)[1][:200]
+        self.assertIn('待认证', seller_line)
+        self.assertNotIn('✓ 已认证', seller_line)
+        self.assertContains(response, order.get_status_display())
+        self.assertNotContains(response, self._pay_url(order))
+        self.assertNotContains(response, '模拟支付')
+
+    # 2b 认证位为 True 时切换到「已认证」徽章
+    def test_verified_seller_shows_verified_badge(self):
+        self.seller.is_verified = True
+        self.seller.save(update_fields=['is_verified'])
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '✓ 已认证', count=1)
+        seller_line = response.content.decode().split('卖家：', 1)[1][:200]
+        self.assertIn('✓ 已认证', seller_line)
+        self.assertNotIn('待认证', seller_line)
+        self.assertContains(response, self.seller.qq)
+        self.assertContains(response, self.seller.wechat)
+
+    # 3 之后状态：7 个非待支付状态逐一展示，门控与状态徽章一致
+    def test_later_states_all_show_contact(self):
+        self._login(self.buyer)
+        for status in ('received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            with self.subTest(status=status):
+                order = self._make_order(status=status)
+                response = self.client.get(self._detail_url(order))
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, '卖家联系方式')
+                self.assertContains(response, self.seller.qq)
+                self.assertContains(response, self.seller.wechat)
+                self.assertContains(response, order.get_status_display())
+                self.assertNotContains(response, self._pay_url(order))
+
+    # 4 支付被拒的 200 重渲染：refresh_from_db 后库内已 paid，
+    #    联系方式门控须与状态徽章一致，且不被 pay_error 绕过
+    def test_pay_error_rerender_gate_matches_status_badge(self):
+        order = self._make_order(status='pending_payment')
+        self._login(self.buyer)
+        Order.objects.filter(pk=order.pk).update(status='paid')
+
+        def stale_lookup(model, *args, **kwargs):
+            return order  # 陈旧实例：status 仍为 pending_payment
+
+        with mock.patch('orders.views.get_object_or_404', side_effect=stale_lookup):
+            response = self.client.post(self._pay_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'alert-danger')
+        self.assertIn('pay_error', response.context)
+        self.assertContains(response, '已支付/待交付')
+        self.assertContains(response, '卖家联系方式')
+        self.assertContains(response, self.seller.qq)
+        self.assertContains(response, self.seller.wechat)
+        self.assertNotContains(response, self._pay_url(order))
+
+    # 5 字段未填：中文占位，页面 200、不抛错
+    def test_empty_contact_values_show_placeholder(self):
+        self.seller.qq = ''
+        self.seller.wechat = ''
+        self.seller.save(update_fields=['qq', 'wechat'])
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '卖家联系方式')
+        self.assertContains(response, '卖家未填写', count=2)
+
+    # 6 他人订单：404 且不泄露联系方式
+    def test_other_user_gets_404_without_contact(self):
+        order = self._make_order(status='paid')
+        self._login(self.other)
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 404)
+        self.assertNotContains(response, self.seller.qq, status_code=404)
+        self.assertNotContains(response, self.seller.wechat, status_code=404)
+        self.assertNotContains(response, '卖家联系方式', status_code=404)
+
+    # 7 匿名访问：302 到登录页，不泄露联系方式
+    def test_anonymous_redirected_to_login(self):
+        order = self._make_order(status='paid')
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith('/login/'))
+        self.assertIn('next=', response.url)
+        self.assertNotContains(response, self.seller.qq, status_code=302)
+        self.assertNotContains(response, self.seller.wechat, status_code=302)
+
+    # 8 下单前页面：即便已有已支付订单，商品详情页/确认页仍无 QQ/微信
+    def test_pre_order_pages_never_show_contact(self):
+        self._make_order(status='paid')
+        self._login(self.buyer)
+        urls = (
+            reverse('product_detail', args=[self.product.pk]),
+            reverse('order_create', kwargs={'product_pk': self.product.pk}),
+        )
+        for url in urls:
+            with self.subTest(url=url):
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertNotContains(response, 'QQ')
+                self.assertNotContains(response, '微信')
+                self.assertNotContains(response, self.seller.qq)
+                self.assertNotContains(response, self.seller.wechat)
+
+    # 9 隐私字面：学号、真实姓名、「学号 (昵称)」形态一律不出现
+    def test_no_student_id_or_real_name_leaked(self):
+        from accounts.models import VerificationRequest
+        VerificationRequest.objects.create(
+            user=self.seller, student_id=self.seller.student_id,
+            name='卖家真实姓名', status='approved',
+        )
+        self._login(self.buyer)
+        for status in ('pending_payment', 'paid', 'reviewed'):
+            with self.subTest(status=status):
+                order = self._make_order(status=status)
+                response = self.client.get(self._detail_url(order))
+                self.assertEqual(response.status_code, 200)
+                self.assertNotContains(response, self.seller.student_id)
+                self.assertNotContains(response, '卖家真实姓名')
+                self.assertNotContains(response, str(self.seller))
+
+    # 10 联系方式值经模板自动转义，不拼接可执行 HTML
+    def test_contact_values_are_escaped(self):
+        self.seller.qq = '<script>alert(1)</script>'
+        self.seller.wechat = 'wx&<b>x</b>'
+        self.seller.save(update_fields=['qq', 'wechat'])
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        response = self.client.get(self._detail_url(order))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '&lt;script&gt;alert(1)&lt;/script&gt;')
+        self.assertContains(response, 'wx&amp;&lt;b&gt;x&lt;/b&gt;')
+        self.assertNotContains(response, '<script>alert(1)</script>')
+        self.assertNotContains(response, '<b>x</b>')

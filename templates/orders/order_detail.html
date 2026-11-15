@@ -17,6 +17,28 @@
             </div>
         </div>
 
+        {% if order.status != 'pending_payment' %}
+            <div class="card mt-3">
+                <div class="card-body">
+                    <h5 class="card-title">卖家联系方式</h5>
+                    <p class="mb-1">
+                        卖家：{{ order.product.owner.username }}
+                        {% if order.product.owner.is_verified %}
+                            <span class="badge bg-success">✓ 已认证</span>
+                        {% else %}
+                            <span class="badge bg-warning text-dark">待认证</span>
+                        {% endif %}
+                    </p>
+                    <p class="mb-1">
+                        QQ：{% if order.product.owner.qq %}{{ order.product.owner.qq }}{% else %}<span class="text-muted">卖家未填写</span>{% endif %}
+                    </p>
+                    <p class="mb-0">
+                        微信：{% if order.product.owner.wechat %}{{ order.product.owner.wechat }}{% else %}<span class="text-muted">卖家未填写</span>{% endif %}
+                    </p>
+                </div>
+            </div>
+        {% endif %}
+
         {% if pay_error %}
             <div class="alert alert-danger mt-3" role="alert">{{ pay_error }}</div>
         {% endif %}
