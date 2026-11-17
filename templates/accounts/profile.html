@@ -82,8 +82,16 @@
                 {% if my_orders_empty %}
                     <p class="text-muted mb-0">暂无订单记录，你还没有任何订单</p>
                 {% else %}
-                    {# 后续 Epic 3 以 filter(buyer=profile_user) 替换空状态 #}
+                    <ul class="list-group list-group-flush">
+                        {% for order in my_orders %}
+                            <li class="list-group-item d-flex justify-content-between align-items-center">
+                                <span>{{ order.product.title }}</span>
+                                <span class="badge bg-secondary">{{ order.get_status_display }}</span>
+                            </li>
+                        {% endfor %}
+                    </ul>
                 {% endif %}
+                <a href="{% url 'my_orders' %}" class="btn btn-outline-secondary btn-sm mt-3">查看全部</a>
             </div>
         </div>
     </div>

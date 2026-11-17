@@ -1,0 +1,50 @@
+{% extends 'base.html' %}
+
+{% block title %}{{ list_title }} - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8 col-lg-7">
+        <h2 class="mb-4 text-center">{{ list_title }}</h2>
+
+        {% if orders_empty %}
+            {% if mode == 'seller' %}
+                <p class="text-muted text-center mb-0">暂无订单记录，你还没有售出任何商品</p>
+            {% else %}
+                <p class="text-muted text-center mb-0">暂无订单记录，你还没有任何订单</p>
+            {% endif %}
+        {% else %}
+            <ul class="list-group">
+                {% for order in orders %}
+                    <li class="list-group-item">
+                        <div class="d-flex justify-content-between align-items-start">
+                            {% if mode == 'seller' %}
+                                <strong><a href="{% url 'product_detail' order.product.pk %}">{{ order.product.title }}</a></strong>
+                            {% else %}
+                                <strong><a href="{% url 'order_detail' order.pk %}">{{ order.product.title }}</a></strong>
+                            {% endif %}
+                            <span class="badge bg-secondary">{{ order.get_status_display }}</span>
+                        </div>
+                        <div class="mt-2">
+                            <span class="me-3">成交价格：¥{{ order.price }}</span>
+                            <span>订单编号：#{{ order.pk }}</span>
+                        </div>
+                        <small class="text-muted d-block mt-1">下单时间：{{ order.created_at|date:'Y-m-d H:i' }}</small>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        <p class="mt-3 text-center">
+            <a href="{% url 'profile' %}">返回个人中心</a>
+        </p>
+        <p class="mt-2 text-center">
+            {% if mode == 'buyer' %}
+                <a href="{% url 'sold_orders' %}">查看售出订单</a>
+            {% else %}
+                <a href="{% url 'my_orders' %}">查看我的订单</a>
+            {% endif %}
+        </p>
+    </div>
+</div>
+{% endblock %}

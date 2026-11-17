@@ -1,10 +1,13 @@
+from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from accounts.models import User
+from accounts.views import PROFILE_ORDERS_SUMMARY_LIMIT
 from listings.models import Product
 from orders.forms import OrderCreateForm
 from orders.models import InvalidTransition, Order
@@ -893,3 +896,270 @@ class OrderContactViewTests(TestCase):
         self.assertContains(response, 'wx&amp;&lt;b&gt;x&lt;/b&gt;')
         self.assertNotContains(response, '<script>alert(1)</script>')
         self.assertNotContains(response, '<b>x</b>')
+
+
+class OrderListViewTests(TestCase):
+    """4.5 订单列表：覆盖 I/O 矩阵——身份隔离、字段与中文状态、空态、
+    登录门控、只读 405/无写入、终态展示、导航与个人中心衔接。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2024401', username='卖家甲', password='test123456',
+            qq='88000000001', wechat='wx_seller_4_5',
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2024402', username='买家甲', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2024403', username='路人乙', password='test123456'
+        )
+        cls.seller_product = Product.objects.create(
+            owner=cls.seller, title='卖家甲的教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材', status='approved',
+        )
+        cls.other_product = Product.objects.create(
+            owner=cls.other, title='路人乙的商品', description='x',
+            price=Decimal('9001.00'), condition='良好', category='教材', status='approved',
+        )
+
+    # ---------- helpers ----------
+    def _login(self, user):
+        self.client.force_login(user)
+
+    def _my_url(self):
+        return reverse('my_orders')
+
+    def _sold_url(self):
+        return reverse('sold_orders')
+
+    def _make_order(self, buyer, product, status='pending_payment'):
+        return Order.objects.create(
+            buyer=buyer, product=product, price=product.price, status=status,
+        )
+
+    def _snapshot(self):
+        return list(Order.objects.values(
+            'pk', 'buyer_id', 'product_id', 'price', 'message', 'status',
+            'created_at', 'updated_at',
+        ).order_by('pk'))
+
+    # ---- 路由：静态列表路径在 <int:pk>/ 之前可达 ----
+    def test_static_list_urls(self):
+        self.assertEqual(self._my_url(), '/orders/mine/')
+        self.assertEqual(self._sold_url(), '/orders/sold/')
+
+    # ---- 买家：仅 buyer=self，字段齐全，他人订单不出现 ----
+    def test_my_orders_only_buyer_orders_with_fields(self):
+        own1 = self._make_order(self.buyer, self.seller_product)
+        own2 = self._make_order(self.buyer, self.other_product)
+        other_order = self._make_order(self.other, self.seller_product)
+        self._login(self.buyer)
+
+        resp = self.client.get(self._my_url())
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, 'orders/order_list.html')
+        self.assertContains(resp, '我的订单')
+        self.assertEqual({o.pk for o in resp.context['orders']}, {own1.pk, own2.pk})
+        self.assertTrue(all(o.buyer_id == self.buyer.pk for o in resp.context['orders']))
+        for order in (own1, own2):
+            self.assertContains(resp, order.product.title)
+            self.assertContains(resp, str(order.price))
+            self.assertContains(resp, f'#{order.pk}')
+            self.assertContains(resp, order.get_status_display())
+            self.assertContains(resp, order.created_at.strftime('%Y-%m-%d %H:%M'))
+        self.assertNotContains(resp, f'#{other_order.pk}')
+
+    # ---- 卖家：仅 product__owner=self，他人商品订单不出现 ----
+    def test_sold_orders_only_own_product_orders(self):
+        sold1 = self._make_order(self.buyer, self.seller_product)
+        sold2 = self._make_order(self.other, self.seller_product)
+        not_mine = self._make_order(self.buyer, self.other_product)
+        self._login(self.seller)
+
+        resp = self.client.get(self._sold_url())
+        self.assertEqual(resp.status_code, 200)
+        self.assertTemplateUsed(resp, 'orders/order_list.html')
+        self.assertContains(resp, '售出订单')
+        self.assertEqual({o.pk for o in resp.context['orders']}, {sold1.pk, sold2.pk})
+        self.assertTrue(
+            all(o.product.owner_id == self.seller.pk for o in resp.context['orders'])
+        )
+        self.assertContains(resp, self.seller_product.title)
+        self.assertNotContains(resp, self.other_product.title)
+        self.assertNotContains(resp, f'#{not_mine.pk}')
+
+    # ---- 两处空状态 ----
+    def test_empty_states_on_both_pages(self):
+        self._login(self.other)  # 无买单、无售出单
+        for url in (self._my_url(), self._sold_url()):
+            with self.subTest(url=url):
+                resp = self.client.get(url)
+                self.assertEqual(resp.status_code, 200)
+                self.assertTrue(resp.context['orders_empty'])
+                self.assertEqual(list(resp.context['orders']), [])
+                self.assertContains(resp, '暂无订单记录')
+
+    # ---- 登录门控：匿名 GET/POST/HEAD 302 带 next ----
+    def test_anonymous_redirected_with_next(self):
+        for url in (self._my_url(), self._sold_url()):
+            for method in ('get', 'post', 'head'):
+                with self.subTest(url=url, method=method):
+                    resp = getattr(self.client, method)(url)
+                    self.assertEqual(resp.status_code, 302)
+                    self.assertEqual(resp.url, f'/login/?next={url}')
+
+    # ---- 只读：405（Allow: GET, HEAD）/ HEAD 200 / 数据库无写入 ----
+    def test_read_only_methods_return_405_without_writes(self):
+        self._make_order(self.buyer, self.seller_product)
+        self._login(self.buyer)
+        before = self._snapshot()
+        for url in (self._my_url(), self._sold_url()):
+            self.assertEqual(self.client.head(url).status_code, 200)
+            for method in (self.client.post, self.client.put,
+                           self.client.patch, self.client.delete):
+                with self.subTest(url=url, method=method):
+                    resp = method(url, {'status': 'paid', 'price': '0.01'})
+                    self.assertEqual(resp.status_code, 405)
+                    self.assertEqual(resp['Allow'], 'GET, HEAD')
+        self.assertEqual(self._snapshot(), before)
+
+    # ---- 终态 / 纠纷状态：中文展示且不改动库内状态 ----
+    def test_terminal_and_dispute_statuses_display_without_mutation(self):
+        statuses = ('reviewed', 'dispute', 'refunded', 'refund_failed')
+        orders = {
+            s: self._make_order(self.buyer, self.seller_product, status=s)
+            for s in statuses
+        }
+        before = self._snapshot()
+
+        self._login(self.buyer)
+        my_page = self.client.get(self._my_url())
+        self._login(self.seller)
+        sold_page = self.client.get(self._sold_url())
+        for resp in (my_page, sold_page):
+            self.assertEqual(resp.status_code, 200)
+            for s in statuses:
+                self.assertContains(resp, orders[s].get_status_display())
+                self.assertContains(resp, f'#{orders[s].pk}')
+        self.assertEqual(self._snapshot(), before)
+
+    # ---- 排序：创建时间倒序（context 与 HTML 双重断言） ----
+    def test_ordered_by_created_at_desc(self):
+        o1 = self._make_order(self.buyer, self.seller_product)
+        o2 = self._make_order(self.buyer, self.seller_product)
+        o3 = self._make_order(self.buyer, self.seller_product)
+        now = timezone.now()
+        for order, days in ((o1, 5), (o2, 1), (o3, 3)):
+            Order.objects.filter(pk=order.pk).update(created_at=now - timedelta(days=days))
+            order.refresh_from_db()
+        self._login(self.buyer)
+
+        resp = self.client.get(self._my_url())
+        expected = [o2.pk, o3.pk, o1.pk]
+        self.assertEqual([o.pk for o in resp.context['orders']], expected)
+        html = resp.content.decode()
+        positions = [html.index(f'#{pk}') for pk in expected]
+        self.assertEqual(positions, sorted(positions))
+
+        # 售出订单同样按创建时间倒序：上述三单均在本卖家的商品上。
+        self._login(self.seller)
+        sold_resp = self.client.get(self._sold_url())
+        self.assertEqual([o.pk for o in sold_resp.context['orders']], expected)
+
+    # ---- 链接与隐私：买家链详情、卖家链商品，且不渲染联系方式/操作按钮 ----
+    def test_links_and_privacy(self):
+        order = self._make_order(self.buyer, self.seller_product)
+        self._login(self.buyer)
+        my_page = self.client.get(self._my_url())
+        self.assertContains(
+            my_page, f'href="{reverse("order_detail", args=[order.pk])}"'
+        )
+        self._login(self.seller)
+        sold_page = self.client.get(self._sold_url())
+        self.assertContains(
+            sold_page,
+            f'href="{reverse("product_detail", args=[self.seller_product.pk])}"',
+        )
+        self.assertNotContains(
+            sold_page, f'href="{reverse("order_detail", args=[order.pk])}"'
+        )
+        for page in (my_page, sold_page):
+            self.assertNotContains(page, self.seller.qq)
+            self.assertNotContains(page, self.seller.wechat)
+            self.assertNotContains(page, '确认收货')
+            self.assertNotContains(page, '模拟支付')
+
+    # ---- 个人中心摘要 + 顶部导航入口 ----
+    def test_profile_summary_and_nav_entry(self):
+        # 锚定按钮自身的 HTML（含专属 class 与「查看全部」文案），避免仅凭
+        # base.html 导航里同样存在的 /orders/mine/ href 造成假阳性。
+        view_all_button = (
+            f'<a href="{self._my_url()}" '
+            'class="btn btn-outline-secondary btn-sm mt-3">查看全部</a>'
+        )
+        self._login(self.buyer)
+        empty = self.client.get(reverse('profile'))
+        self.assertTrue(empty.context['my_orders_empty'])
+        self.assertContains(empty, '暂无订单记录')
+        self.assertContains(empty, view_all_button)
+
+        order = self._make_order(self.buyer, self.seller_product, status='paid')
+        resp = self.client.get(reverse('profile'))
+        self.assertFalse(resp.context['my_orders_empty'])
+        self.assertContains(resp, self.seller_product.title)
+        self.assertContains(resp, order.get_status_display())
+        self.assertContains(resp, view_all_button)
+        self.assertTrue(all(o.buyer_id == self.buyer.pk for o in resp.context['my_orders']))
+
+        home = self.client.get(reverse('home'))
+        self.assertContains(home, f'href="{self._my_url()}"')
+        self.client.logout()
+        self.assertNotContains(self.client.get(reverse('home')),
+                               f'href="{self._my_url()}"')
+
+    # ---- 个人中心摘要：buyer 隔离（改 filter(buyer=...) 为 all() 必须失败） ----
+    def test_profile_summary_isolates_other_buyers_orders(self):
+        mine = self._make_order(self.buyer, self.seller_product)
+        self._make_order(self.other, self.other_product)
+        self._login(self.buyer)
+
+        resp = self.client.get(reverse('profile'))
+        self.assertEqual({o.pk for o in resp.context['my_orders']}, {mine.pk})
+        self.assertContains(resp, self.seller_product.title)
+        self.assertNotContains(resp, self.other_product.title)
+
+    # ---- 个人中心摘要仅最近若干条：区分 created_at，且上限跟随生产常量 ----
+    def test_profile_summary_is_limited_to_recent(self):
+        now = timezone.now()
+        recent, oldest = [], []
+        for i in range(7):
+            product = Product.objects.create(
+                owner=self.seller, title=f'摘要专用商品{i}', description='x',
+                price=Decimal('10.00'), condition='良好', category='教材',
+                status='approved',
+            )
+            order = self._make_order(self.buyer, product)
+            Order.objects.filter(pk=order.pk).update(
+                created_at=now - timedelta(days=7 - i)
+            )
+            order.refresh_from_db()
+            (recent if i >= 2 else oldest).append(order)
+        self._login(self.buyer)
+
+        resp = self.client.get(reverse('profile'))
+        summary = resp.context['my_orders']
+        self.assertEqual(len(summary), PROFILE_ORDERS_SUMMARY_LIMIT)
+        self.assertEqual({o.pk for o in summary}, {o.pk for o in recent})
+        for order in recent:
+            self.assertContains(resp, order.product.title)
+        for order in oldest:
+            self.assertNotContains(resp, order.product.title)
+
+    # ---- 他人订单详情仍 404（既有行为，本故事保持不变） ----
+    def test_other_user_order_detail_still_404(self):
+        order = self._make_order(self.buyer, self.seller_product)
+        self._login(self.other)
+        self.assertEqual(
+            self.client.get(reverse('order_detail', args=[order.pk])).status_code, 404
+        )

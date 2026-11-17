@@ -7,6 +7,10 @@ from django.views.decorators.http import require_POST, require_safe
 from .forms import LoginForm, RegisterForm, VerificationForm
 from .models import VerificationRequest
 from listings.models import Product, RejectionNotice
+from orders.models import Order
+
+# 个人中心「我的订单」卡片只展示最近若干条摘要，全量列表在独立页。
+PROFILE_ORDERS_SUMMARY_LIMIT = 5
 
 
 def register(request):
@@ -136,14 +140,21 @@ def profile_view(request):
     # 不经 visible()，四态（pending/approved/rejected/offline）对卖家本人均可见；
     # 只读展示，排序沿用 Product.Meta.ordering('-created_at')。
     my_listings = list(Product.objects.filter(owner=profile_user))
+    # 4.5：「我的订单」卡片按 buyer=profile_user 取最近若干条真实摘要（只读），
+    # 沿用 Order.Meta.ordering('-created_at')；全量在独立页 /orders/mine/。
+    my_orders = list(
+        Order.objects.filter(buyer=profile_user)
+        .select_related('product')[:PROFILE_ORDERS_SUMMARY_LIMIT]
+    )
     return render(request, 'accounts/profile.html', {
         'profile_user': profile_user,
         'verification_requests': profile_user.verification_requests.all(),
-        # 方案 A「壳 + 空状态」：订单 / 评价两板块暂无业务数据，统一空状态；Epic 3/4
-        # 接入真实数据时，以 filter(buyer=profile_user) / filter(owner=profile_user) 替换。
+        # 方案 A「壳 + 空状态」：评价板块暂无业务数据，保持空状态；订单板块已由 4.5
+        # 接入真实数据（filter(buyer=profile_user) 摘要），其余板块不变。
         'my_listings': my_listings,
         'my_listings_empty': not my_listings,
-        'my_orders_empty': True,
+        'my_orders': my_orders,
+        'my_orders_empty': not my_orders,
         'my_messages': my_messages,
         'my_messages_empty': not my_messages,
         'my_reviews_empty': True,

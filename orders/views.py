@@ -89,3 +89,35 @@ def order_pay(request, pk):
                       {'order': order,
                        'pay_error': '支付被拒绝：订单当前状态不允许支付，请勿重复提交；当前状态以上方状态徽章为准'})
     return redirect('order_detail', pk=pk)
+
+
+# 4.5 订单列表：沿用 2.4 的只读列表范式（@login_required 外层 + @require_safe 内层、
+# 服务端强制过滤、list() 求值、创建时间倒序、不分页）。两者共用同一模板，以 mode
+# 区分身份：买家列表项链到 order_detail（仅 buyer 可见），卖家列表项链到公开的
+# product_detail，避免卖家点击后落入只认 buyer 的详情而 404。
+@login_required
+@require_safe
+def my_orders_view(request):
+    """我的订单：按 buyer=request.user 只读呈现本人全部订单（含各终态）。"""
+    orders = list(Order.objects.filter(buyer=request.user).select_related('product'))
+    return render(request, 'orders/order_list.html', {
+        'orders': orders,
+        'orders_empty': not orders,
+        'mode': 'buyer',
+        'list_title': '我的订单',
+    })
+
+
+@login_required
+@require_safe
+def sold_orders_view(request):
+    """售出订单：按 product__owner=request.user 只读呈现本人商品的全部订单。"""
+    orders = list(
+        Order.objects.filter(product__owner=request.user).select_related('product')
+    )
+    return render(request, 'orders/order_list.html', {
+        'orders': orders,
+        'orders_empty': not orders,
+        'mode': 'seller',
+        'list_title': '售出订单',
+    })

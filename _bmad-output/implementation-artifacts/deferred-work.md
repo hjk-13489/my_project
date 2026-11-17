@@ -75,3 +75,9 @@
 - source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-3-下单后展示联系方式.md`
   summary: 普通用户自助填写 QQ/微信的入口 — 4.3 仅在 `accounts.User` 提供 `qq` / `wechat` 两个可选字段作为唯一数据源，并按订单状态在详情页渲染 + 门控；不提供任何注册、个人中心资料编辑、表单、视图或模板让用户自行维护这两个字段。演示联系方式由 `manage.py shell` 用 `User.objects.filter(student_id=...).update(qq=..., wechat=...)` 预置。
   evidence: 人类决策 Q2=A（2026-11-15）：4.3 范围明确收窄为「按状态渲染 + 门控」，自助填写入口登记为 deferred work。`accounts/admin.py` 的 `fieldsets` / `add_fieldsets` 显式列字段且按 spec-4-3 的 Never 不改，新字段不会自动出现在 admin 编辑页；`accounts/forms.py` 的 `RegisterForm.Meta.fields` 亦显式为 `['student_id', 'username']`，新字段不会进入注册表单。自助填写入口需后续故事（建议与个人中心资料编辑一并设计）补上。
+
+## Deferred from: code review of spec-4-5-订单列表 (2026-11-17)
+
+- source_spec: `C:/Users/18165/Desktop/my_project/_bmad-output/implementation-artifacts/spec-4-5-订单列表.md`
+  summary: 既有测试 `test_pre_order_pages_never_show_contact` 的概率性 CSRF 抖动 — 该用例用 `assertNotContains(response, 'QQ')` 检查下单前页面不暴露卖家联系方式，偶被 Django CSRF token 中的随机字母 "QQ" 子串误命中导致全量测试随机失败。
+  evidence: pre-existing，baseline `80f393f` 中已存在（4.3 引入，现 `orders/tests.py:853`），非本故事引入，本故事未改动该用例；重跑与隔离运行均通过。修复需把断言改为针对页面语义节点（而非裸字符串），属既有测试的独立问题，超出 4.5 边界，故 deferred。
