@@ -91,6 +91,32 @@ def order_pay(request, pk):
     return redirect('order_detail', pk=pk)
 
 
+# 4.6 确认收货：仅 POST、仅 buyer 本人。沿用 order_pay 的 decorator 组合与
+# 事务范式；状态流转只经 Order.confirm_receipt()（paid → received → completed），
+# received 为事务中间态，不对外可见。
+@login_required
+@require_POST
+def order_confirm_receipt(request, pk):
+    """确认收货：在单个事务内经 Order.confirm_receipt() 完成两跳流转。
+
+    取订单与 confirm_receipt() 置于同一事务；非法/重复/陈旧实例流转抛
+    InvalidTransition，以 200 重渲染详情页并给出 alert-danger 中文拒绝提示
+    （键名 receipt_error，与 pay_error 互不混用）；成功则 PRG 回详情页。
+    """
+    try:
+        with transaction.atomic():
+            order = get_object_or_404(Order, pk=pk, buyer=request.user)
+            order.confirm_receipt()
+    except InvalidTransition:
+        # 并发/陈旧实例被拒时库内状态可能已被推进，重读后再渲染，
+        # 使状态徽章反映库内真实状态，而不是被拒绝的内存状态。
+        order.refresh_from_db()
+        return render(request, 'orders/order_detail.html',
+                      {'order': order,
+                       'receipt_error': '收货被拒绝：订单当前状态不允许确认收货，请勿重复提交；当前状态以上方状态徽章为准'})
+    return redirect('order_detail', pk=pk)
+
+
 # 4.5 订单列表：沿用 2.4 的只读列表范式（@login_required 外层 + @require_safe 内层、
 # 服务端强制过滤、list() 求值、创建时间倒序、不分页）。两者共用同一模板，以 mode
 # 区分身份：买家列表项链到 order_detail（仅 buyer 可见），卖家列表项链到公开的

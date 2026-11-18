@@ -692,6 +692,231 @@ class OrderPayViewTests(TestCase):
         self.assertEqual(order.status, before_status)
 
 
+class OrderConfirmReceiptViewTests(TestCase):
+    """4.6 确认收货：视图层覆盖 I/O 矩阵，照搬 4.2 order_pay 的 HTTP 层范式。"""
+
+    RECEIPT_ERROR = (
+        '收货被拒绝：订单当前状态不允许确认收货，请勿重复提交；'
+        '当前状态以上方状态徽章为准'
+    )
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2024201', username='卖家', password='test123456'
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2024202', username='买家', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2024203', username='路人', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材',
+            status='approved',
+        )
+
+    # ---------- helpers ----------
+    def _make_order(self, status='paid'):
+        return Order.objects.create(
+            buyer=self.buyer, product=self.product,
+            price=self.product.price, status=status,
+        )
+
+    def _receipt_url(self, order):
+        return reverse('order_confirm_receipt', kwargs={'pk': order.pk})
+
+    def _detail_url(self, order):
+        return reverse('order_detail', kwargs={'pk': order.pk})
+
+    def _login(self, user):
+        self.client.login(username=user.student_id, password='test123456')
+
+    # 1 正常收货：两跳落 completed（received 为事务中间态不对外可见），
+    #    302 落点、updated_at 更新、成功后不再渲染收货按钮
+    def test_confirm_receipt_success_transitions_and_redirects(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        order.refresh_from_db()
+        before = order.updated_at
+
+        response = self.client.post(self._receipt_url(order))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        self.assertGreater(order.updated_at, before)
+        self.assertEqual(Order.objects.count(), 1)  # 不新增订单
+
+        detail = self.client.get(self._detail_url(order))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, '已完成')
+        self.assertNotContains(detail, '确认收货')
+        self.assertNotContains(detail, self._receipt_url(order))
+
+    # 2 按钮门控：仅 paid 渲染收货表单；其余状态只显示徽章与链接
+    #    （received 的徽章文案本身含「确认收货」，故以表单 URL 判定按钮有无）
+    def test_receipt_button_only_shown_when_paid(self):
+        self._login(self.buyer)
+        paid = self._make_order(status='paid')
+        detail = self.client.get(self._detail_url(paid))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, self._receipt_url(paid))
+        self.assertContains(detail, '确认收货')
+        self.assertContains(detail, 'csrfmiddlewaretoken')
+
+        for status in ('pending_payment', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            with self.subTest(status=status):
+                detail = self.client.get(self._detail_url(order))
+                self.assertEqual(detail.status_code, 200)
+                self.assertNotContains(detail, self._receipt_url(order))
+                self.assertContains(detail, order.get_status_display())
+
+    # 2b 表单以 POST 提交并走通收货：method/action 正确，提交后 302 且状态流转
+    def test_receipt_form_is_post_and_completes_receipt(self):
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+
+        detail = self.client.get(self._detail_url(order))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(
+            detail,
+            '<form method="post" action="%s"' % self._receipt_url(order),
+        )
+
+        response = self.client.post(self._receipt_url(order))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
+    # 3 非法方法：已登录 GET/PUT/DELETE → 405（Allow: POST），状态不变
+    def test_non_post_methods_405(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        for method in ('get', 'put', 'delete'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._receipt_url(order))
+                self.assertEqual(response.status_code, 405)
+                self.assertEqual(response['Allow'], 'POST')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+
+    # 4 未登录：匿名 GET/POST 一律 302 到登录页（带 next），状态不变
+    def test_anonymous_redirected_to_login(self):
+        order = self._make_order()
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._receipt_url(order))
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.url.startswith('/login/'))
+                self.assertIn('next=', response.url)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+
+    # 5 他人订单：非 buyer POST → 404，状态不变
+    def test_other_user_order_404(self):
+        order = self._make_order()
+        self._login(self.other)
+        response = self.client.post(self._receipt_url(order))
+        self.assertEqual(response.status_code, 404)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+
+    # 6 不存在订单：不存在的 pk → 404
+    def test_nonexistent_order_404(self):
+        self._login(self.buyer)
+        url = reverse('order_confirm_receipt', kwargs={'pk': 999999})
+        self.assertEqual(self.client.post(url).status_code, 404)
+
+    # 7 非法/重复状态：POST → 200 重渲染 + 可见错误条，状态与 updated_at
+    #    均不变，且不再渲染收货表单（以表单 URL 判定）
+    def test_invalid_transitions_rejected_with_error_bar(self):
+        self._login(self.buyer)
+        for status in ('pending_payment', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            order.refresh_from_db()
+            before = order.updated_at
+            with self.subTest(status=status):
+                response = self.client.post(self._receipt_url(order))
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'alert-danger')
+                self.assertContains(response, self.RECEIPT_ERROR)
+                self.assertIn('receipt_error', response.context)
+                self.assertContains(response, order.get_status_display())
+                self.assertNotContains(response, self._receipt_url(order))
+                order.refresh_from_db()
+                self.assertEqual(order.status, status)
+                self.assertEqual(order.updated_at, before)
+
+    # 8a 连续两次提交：恰好一次流转到 completed，第二次被状态机拒绝且可见
+    def test_double_submit_transitions_only_once(self):
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        first = self.client.post(self._receipt_url(order))
+        self.assertEqual(first.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        before = order.updated_at
+
+        second = self.client.post(self._receipt_url(order))
+
+        self.assertEqual(second.status_code, 200)
+        self.assertContains(second, 'alert-danger')
+        self.assertContains(second, self.RECEIPT_ERROR)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.updated_at, before)
+
+    # 8b 并发/陈旧实例：取到「已支付」实例后库内已被并发推进到 dispute，
+    #    条件更新挡住二次流转；refresh_from_db 后徽章显示库内真实状态
+    def test_concurrent_stale_instance_rejected_visibly(self):
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        # 模拟并发请求先把库内状态推进到 dispute（不影响内存中 order 的 status）
+        Order.objects.filter(pk=order.pk).update(status='dispute')
+
+        def stale_lookup(model, *args, **kwargs):
+            return order  # 陈旧实例：status 仍为 paid
+
+        with mock.patch('orders.views.get_object_or_404', side_effect=stale_lookup):
+            response = self.client.post(self._receipt_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'alert-danger')
+        self.assertContains(response, self.RECEIPT_ERROR)
+        self.assertNotContains(response, self._receipt_url(order))
+        self.assertIn('receipt_error', response.context)
+        self.assertContains(response, '纠纷')  # 徽章反映库内真实状态
+        self.assertEqual(Order.objects.get(pk=order.pk).status, 'dispute')
+
+    # 9 伪造字段：POST 携带 status 等字段全部被忽略，仅 confirm_receipt() 流转
+    def test_forged_post_fields_ignored(self):
+        order = self._make_order(status='paid')
+        self._login(self.buyer)
+        response = self.client.post(self._receipt_url(order), {
+            'status': 'completed',
+            'price': '0.01',
+            'buyer': self.other.pk,
+            'product': 999999,
+        })
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        self.assertEqual(order.price, self.product.price)
+        self.assertEqual(order.buyer, self.buyer)
+        self.assertEqual(order.product, self.product)
+
+    # 注：I/O 矩阵「收货后退款不可达」由模型层既有测试
+    #    OrderStateMachineTests.test_request_refund_after_receipt_rejected 覆盖，
+    #    本故事不新增退款 UI 或模型层重复用例。
+
+
 class OrderContactViewTests(TestCase):
     """4.3 下单后展示联系方式：按订单状态门控，覆盖 I/O 矩阵全部 9 行。"""
 
