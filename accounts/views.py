@@ -1,13 +1,14 @@
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.db import IntegrityError
+from django.db.models import F, Q
 from django.shortcuts import render, redirect
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST, require_safe
 from .forms import LoginForm, RegisterForm, VerificationForm
 from .models import VerificationRequest
 from listings.models import Product, RejectionNotice
-from orders.models import Order
+from orders.models import Order, Review
 
 # 个人中心「我的订单」卡片只展示最近若干条摘要，全量列表在独立页。
 PROFILE_ORDERS_SUMMARY_LIMIT = 5
@@ -146,16 +147,23 @@ def profile_view(request):
         Order.objects.filter(buyer=profile_user)
         .select_related('product')[:PROFILE_ORDERS_SUMMARY_LIMIT]
     )
+    # 4.7「我的评价」展示我收到的评价：Review 不存被评人，由订单关系推导——
+    # 我是买家时评价人是商品 owner（卖家），我是卖家时评价人是订单 buyer。
+    my_reviews = list(
+        Review.objects.filter(
+            Q(order__buyer=profile_user, reviewer=F('order__product__owner'))
+            | Q(order__product__owner=profile_user, reviewer=F('order__buyer'))
+        ).select_related('order', 'order__product', 'reviewer')
+    )
     return render(request, 'accounts/profile.html', {
         'profile_user': profile_user,
         'verification_requests': profile_user.verification_requests.all(),
-        # 方案 A「壳 + 空状态」：评价板块暂无业务数据，保持空状态；订单板块已由 4.5
-        # 接入真实数据（filter(buyer=profile_user) 摘要），其余板块不变。
         'my_listings': my_listings,
         'my_listings_empty': not my_listings,
         'my_orders': my_orders,
         'my_orders_empty': not my_orders,
         'my_messages': my_messages,
         'my_messages_empty': not my_messages,
-        'my_reviews_empty': True,
+        'my_reviews': my_reviews,
+        'my_reviews_empty': not my_reviews,
     })

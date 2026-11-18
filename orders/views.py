@@ -1,15 +1,20 @@
 from django.contrib.auth.decorators import login_required
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST, require_http_methods, require_safe
 
 from listings.models import Product
 
-from .forms import OrderCreateForm
-from .models import InvalidTransition, Order
+from .forms import OrderCreateForm, ReviewForm
+from .models import InvalidTransition, Order, Review
 
 # 已收尾状态：这些状态不再占用「同一买家 + 同一商品」的下单名额。
 CLOSED_STATUSES = ('completed', 'reviewed', 'refunded', 'refund_failed')
+
+# 4.7 评价拒绝提示：视图层统一中文文案，模板直接渲染 form 的非字段错误。
+REVIEW_STATUS_ERROR = '评价被拒绝：只有「已完成」的订单可以评价'
+REVIEW_DUPLICATE_ERROR = '评价被拒绝：你已评价过该订单，请勿重复提交'
 
 
 # @login_required 外层：未登录 GET/POST 优先 302 到登录页（带 next）。
@@ -146,4 +151,77 @@ def sold_orders_view(request):
         'orders_empty': not orders,
         'mode': 'seller',
         'list_title': '售出订单',
+    })
+
+
+# 4.7 互评：买卖双方共用一个入口。@login_required 在最外层，使匿名 POST 先
+# 302 到登录页；内层显式放行 GET/HEAD（展示）与 POST（提交），其余方法 405。
+@login_required
+@require_http_methods(['GET', 'HEAD', 'POST'])
+def order_review(request, pk):
+    """双方通用的评价页：GET 展示评价对象与状态，POST 在同一事务内落评价。
+
+    仅订单当事人（buyer 或 product.owner）可进入，无关用户 404。评价人与被评人
+    由登录用户与订单关系推导，不接受客户端传入的用户 ID。单方提交只落评价、
+    不改订单状态；第二条评价落库后经 Order.mark_reviewed() 流转到「已互评」。
+    """
+    participant = Q(buyer=request.user) | Q(product__owner=request.user)
+    order = get_object_or_404(
+        Order.objects.filter(participant).select_related(
+            'product', 'product__owner', 'buyer'
+        ),
+        pk=pk,
+    )
+    reviewer_is_buyer = request.user == order.buyer
+    reviewee = order.product.owner if reviewer_is_buyer else order.buyer
+
+    if request.method == 'POST':
+        form = ReviewForm(request.POST)
+        submitted = False
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    # 校验与落库处于同一事务；锁订单行串行化同一订单上的并发评价。
+                    locked = get_object_or_404(
+                        Order.objects.filter(participant).select_for_update(),
+                        pk=pk,
+                    )
+                    if locked.status != 'completed':
+                        form.add_error(None, REVIEW_STATUS_ERROR)
+                    elif locked.reviews.filter(reviewer=request.user).exists():
+                        form.add_error(None, REVIEW_DUPLICATE_ERROR)
+                    else:
+                        Review.objects.create(
+                            order=locked,
+                            reviewer=request.user,
+                            content=form.cleaned_data['content'],
+                        )
+                        # 双方齐备才流转，单方提交保持「已完成」。
+                        if locked.reviews.count() >= 2:
+                            locked.mark_reviewed()
+                        submitted = True
+            except InvalidTransition:
+                # 并发下订单已被推进（如已互评）：事务回滚，评价不落库。
+                form.add_error(None, REVIEW_STATUS_ERROR)
+            except IntegrityError:
+                # 并发重复提交触发 unique_together：事务回滚，按重复提交提示。
+                form.add_error(None, REVIEW_DUPLICATE_ERROR)
+            if submitted:
+                return redirect('order_review', pk=pk)
+        # 失败重渲染：刷新库内真实状态，使徽章与提示不显示陈旧状态。
+        order.refresh_from_db()
+    else:
+        form = ReviewForm()
+
+    my_review = order.reviews.filter(reviewer=request.user).first()
+    both_reviewed = order.reviews.count() >= 2
+    return render(request, 'orders/order_review.html', {
+        'order': order,
+        'form': form,
+        'reviewer_is_buyer': reviewer_is_buyer,
+        'reviewee': reviewee,
+        'my_review': my_review,
+        'other_review': order.reviews.exclude(reviewer=request.user).first(),
+        'waiting': my_review is not None and not both_reviewed,
+        'both_reviewed': both_reviewed,
     })

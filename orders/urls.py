@@ -11,4 +11,5 @@ urlpatterns = [
     path('<int:pk>/pay/', views.order_pay, name='order_pay'),
     path('<int:pk>/confirm-receipt/', views.order_confirm_receipt,
          name='order_confirm_receipt'),
+    path('<int:pk>/review/', views.order_review, name='order_review'),
 ]

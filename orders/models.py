@@ -123,3 +123,42 @@ class Order(models.Model):
                 )
         self.status = target
         self.updated_at = now
+
+
+class Review(models.Model):
+    """互评记录：挂在订单上，买卖双方各一条；被评人由订单关系推导，不单独存储。"""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='reviews',
+        verbose_name='订单',
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='reviews_written',
+        verbose_name='评价人',
+    )
+    content = models.TextField(verbose_name='评价内容')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='评价时间')
+
+    class Meta:
+        verbose_name = '评价'
+        verbose_name_plural = '评价'
+        ordering = ('-created_at',)
+        # 每个订单、每个当事人最多一条评价；写视图另做前置校验，此为数据库兜底。
+        unique_together = ('order', 'reviewer')
+
+    def __str__(self):
+        return f'订单 #{self.order_id} 中 {self.reviewer} 的评价'
+
+    @property
+    def reviewer_is_buyer(self):
+        """评价人身份：是否为该订单的买家（否则即卖家）。"""
+        return self.reviewer_id == self.order.buyer_id
+
+    @property
+    def reviewee(self):
+        """被评人：评价人是买家则被评人为卖家，评价人是卖家则被评人为买家。"""
+        return self.order.product.owner if self.reviewer_is_buyer else self.order.buyer

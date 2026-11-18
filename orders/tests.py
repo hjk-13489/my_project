@@ -2,6 +2,7 @@ from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
 
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -9,8 +10,9 @@ from django.utils import timezone
 from accounts.models import User
 from accounts.views import PROFILE_ORDERS_SUMMARY_LIMIT
 from listings.models import Product
-from orders.forms import OrderCreateForm
-from orders.models import InvalidTransition, Order
+from orders.forms import OrderCreateForm, ReviewForm
+from orders.models import InvalidTransition, Order, Review
+from orders.views import REVIEW_DUPLICATE_ERROR, REVIEW_STATUS_ERROR
 
 
 class OrderStateMachineTests(TestCase):
@@ -1388,3 +1390,269 @@ class OrderListViewTests(TestCase):
         self.assertEqual(
             self.client.get(reverse('order_detail', args=[order.pk])).status_code, 404
         )
+
+
+class OrderReviewTests(TestCase):
+    """4.7 互评：覆盖 I/O 矩阵——先后评、单方不流转、状态不符、重复、越权、未登录。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2025201', username='卖家', password='test123456'
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2025202', username='买家', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2025203', username='路人', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材', status='approved',
+        )
+
+    # ---------- helpers ----------
+    def _make_order(self, status='completed'):
+        return Order.objects.create(
+            buyer=self.buyer, product=self.product,
+            price=self.product.price, status=status,
+        )
+
+    def _review_url(self, order):
+        return reverse('order_review', kwargs={'pk': order.pk})
+
+    def _login(self, user):
+        self.client.force_login(user)
+
+    def _add_review(self, order, user, content='评价内容'):
+        return Review.objects.create(order=order, reviewer=user, content=content)
+
+    # 1 买家先评：落评价、推导身份、订单仍「已完成」
+    def test_buyer_review_first_keeps_order_completed(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        response = self.client.post(self._review_url(order), {'content': '书很新'})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._review_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+        review = Review.objects.get(order=order)
+        self.assertEqual(review.reviewer, self.buyer)
+        self.assertEqual(review.reviewee, self.seller)
+        self.assertTrue(review.reviewer_is_buyer)
+        self.assertEqual(review.content, '书很新')
+
+    # 2 卖家后评闭环：第二条经 mark_reviewed() → reviewed
+    def test_seller_second_review_closes_loop(self):
+        order = self._make_order()
+        self._add_review(order, self.buyer, '买家评价')
+        self._login(self.seller)
+        response = self.client.post(self._review_url(order), {'content': '买家很守时'})
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'reviewed')
+        self.assertEqual(order.reviews.count(), 2)
+        seller_review = Review.objects.get(order=order, reviewer=self.seller)
+        self.assertFalse(seller_review.reviewer_is_buyer)
+        self.assertEqual(seller_review.reviewee, self.buyer)
+
+    # 3 顺序对称：卖家先评 / 买家后评同样在第二条闭环
+    def test_seller_first_then_buyer_symmetric(self):
+        order = self._make_order()
+        self._add_review(order, self.seller, '卖家先评')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
+        self._login(self.buyer)
+        response = self.client.post(self._review_url(order), {'content': '买家后评'})
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'reviewed')
+        self.assertEqual(order.reviews.count(), 2)
+
+    # 4 单方未齐：状态保持「已完成」，页面提示等待对方评价
+    def test_single_review_waits_and_shows_hint(self):
+        order = self._make_order()
+        self._add_review(order, self.buyer, '先评')
+        self._login(self.buyer)
+        response = self.client.get(self._review_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '等待对方评价')
+        self.assertContains(response, '你已评价')
+        self.assertContains(response, order.get_status_display())
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
+    # 5 状态不符：拒绝、不落评价、不改状态
+    def test_invalid_status_rejected(self):
+        self._login(self.buyer)
+        for status in ('pending_payment', 'paid', 'received', 'dispute', 'reviewed'):
+            with self.subTest(status=status):
+                order = self._make_order(status=status)
+                before = Review.objects.count()
+                response = self.client.post(self._review_url(order), {'content': '评价'})
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'alert-danger')
+                self.assertContains(response, REVIEW_STATUS_ERROR)
+                self.assertEqual(Review.objects.count(), before)
+                order.refresh_from_db()
+                self.assertEqual(order.status, status)
+
+    # 6 重复提交：拒绝且不产生第二条
+    def test_duplicate_review_rejected(self):
+        order = self._make_order()
+        self._add_review(order, self.buyer, '第一条')
+        self._login(self.buyer)
+        response = self.client.post(self._review_url(order), {'content': '第二条'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, REVIEW_DUPLICATE_ERROR)
+        self.assertEqual(order.reviews.filter(reviewer=self.buyer).count(), 1)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
+    # 7 越权：非当事人 GET/POST 一律 404
+    def test_other_user_404_on_get_and_post(self):
+        order = self._make_order()
+        self._login(self.other)
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    self._review_url(order), {'content': 'x'}
+                )
+                self.assertEqual(response.status_code, 404)
+        self.assertEqual(Review.objects.count(), 0)
+
+    # 8 未登录：GET/POST 302 跳登录页并带 next
+    def test_anonymous_redirected_to_login(self):
+        order = self._make_order()
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    self._review_url(order), {'content': 'x'}
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.url.startswith('/login/'))
+                self.assertIn('next=', response.url)
+        self.assertEqual(Review.objects.count(), 0)
+
+    # 9 空白评价被拒（含纯空白）
+    def test_empty_content_rejected(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        for content in ('', '   '):
+            with self.subTest(content=repr(content)):
+                response = self.client.post(self._review_url(order), {'content': content})
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, '评价内容不能为空')
+                self.assertEqual(Review.objects.count(), 0)
+
+    # 10 GET 展示表单、评价对象与状态
+    def test_get_shows_form_reviewee_and_status(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        response = self.client.get(self._review_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'orders/order_review.html')
+        self.assertContains(response, '订单互评')
+        self.assertContains(response, self.product.title)
+        self.assertContains(response, self.seller.username)
+        self.assertContains(response, 'name="content"')
+        self.assertContains(response, '提交评价')
+        self.assertEqual(list(ReviewForm().fields), ['content'])
+
+    # 11 伪造 reviewer/status 字段无效：身份完全由登录用户推导
+    def test_forged_reviewer_fields_ignored(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        response = self.client.post(self._review_url(order), {
+            'content': '真实评价',
+            'reviewer': self.other.pk,
+            'order': self._make_order().pk,
+            'status': 'reviewed',
+        })
+
+        self.assertEqual(response.status_code, 302)
+        review = Review.objects.get()
+        self.assertEqual(review.reviewer, self.buyer)
+        self.assertEqual(review.order, order)
+        self.assertEqual(review.content, '真实评价')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'completed')
+
+    # 12 不存在的订单 404
+    def test_nonexistent_order_404(self):
+        self._login(self.buyer)
+        url = reverse('order_review', kwargs={'pk': 999999})
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.client.post(url, {'content': 'x'}).status_code, 404)
+
+    # 13 PUT/DELETE → 405
+    def test_unsafe_methods_405(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        for method in ('put', 'delete'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._review_url(order))
+                self.assertEqual(response.status_code, 405)
+
+    # 14 详情页与两个订单列表均有评价入口
+    def test_entry_links_on_detail_and_both_lists(self):
+        order = self._make_order()
+        url = self._review_url(order)
+
+        self._login(self.buyer)
+        self.assertContains(
+            self.client.get(reverse('order_detail', args=[order.pk])), url
+        )
+        self.assertContains(self.client.get(reverse('my_orders')), url)
+
+        self._login(self.seller)
+        self.assertContains(self.client.get(reverse('sold_orders')), url)
+
+    # 15 个人中心「我的评价」只展示我收到的评价
+    def test_profile_shows_received_reviews_only(self):
+        order = self._make_order()
+        self._add_review(order, self.buyer, '卖家收到的评价')
+        self._add_review(order, self.seller, '买家收到的评价')
+
+        self._login(self.seller)
+        seller_profile = self.client.get(reverse('profile'))
+        self.assertContains(seller_profile, '卖家收到的评价')
+        self.assertNotContains(seller_profile, '买家收到的评价')
+        self.assertEqual(len(seller_profile.context['my_reviews']), 1)
+
+        self._login(self.buyer)
+        buyer_profile = self.client.get(reverse('profile'))
+        self.assertContains(buyer_profile, '买家收到的评价')
+        self.assertNotContains(buyer_profile, '卖家收到的评价')
+        self.assertEqual(len(buyer_profile.context['my_reviews']), 1)
+
+        self._login(self.other)
+        other_profile = self.client.get(reverse('profile'))
+        self.assertTrue(other_profile.context['my_reviews_empty'])
+
+    # 16 数据库唯一约束兜底：同一订单同一当事人至多一条
+    def test_unique_constraint_per_order_and_reviewer(self):
+        order = self._make_order()
+        self._add_review(order, self.buyer)
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._add_review(order, self.buyer)
+
+    # 17 双方齐备：GET 展示闭环横幅与对方评价正文
+    def test_both_reviewed_get_shows_banner_and_other_review(self):
+        order = self._make_order()
+        self._add_review(order, self.buyer, '买家评价正文')
+        self._add_review(order, self.seller, '卖家评价正文')
+
+        self._login(self.buyer)
+        response = self.client.get(self._review_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '双方已完成互评')
+        self.assertContains(response, '卖家评价正文')

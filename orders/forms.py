@@ -17,3 +17,19 @@ class OrderCreateForm(forms.Form):
             'max_length': '留言不能超过 500 个字符',
         },
     )
+
+
+class ReviewForm(forms.Form):
+    """评价表单：只暴露评价正文；订单、评价人与被评人均由服务端从登录用户与订单推导。"""
+
+    content = forms.CharField(
+        label='评价内容',
+        widget=forms.Textarea(attrs={
+            'class': 'form-control',
+            'rows': 5,
+            'placeholder': '请输入对本次交易的真实评价',
+        }),
+        error_messages={
+            'required': '评价内容不能为空',
+        },
+    )

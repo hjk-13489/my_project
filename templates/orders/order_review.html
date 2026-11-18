@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+
+{% block title %}订单互评 - 校园二手书交易平台{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8 col-lg-6">
+        <h2 class="mb-4 text-center">订单互评</h2>
+
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">{{ order.product.title }}</h5>
+                <p class="mb-1">订单编号：#{{ order.pk }}</p>
+                <p class="mb-1">
+                    你的身份：
+                    {% if reviewer_is_buyer %}
+                        <span class="badge bg-primary">买家</span>
+                    {% else %}
+                        <span class="badge bg-info text-dark">卖家</span>
+                    {% endif %}
+                </p>
+                <p class="mb-1">评价对象：{{ reviewee.username }}</p>
+                <p class="mb-0">当前状态：<span class="badge bg-warning text-dark">{{ order.get_status_display }}</span></p>
+            </div>
+        </div>
+
+        {% if form.non_field_errors or form.content.errors %}
+            <div class="alert alert-danger mt-3" role="alert">
+                {{ form.non_field_errors }}
+                {{ form.content.errors }}
+            </div>
+        {% endif %}
+
+        {% if both_reviewed %}
+            <div class="alert alert-success mt-3" role="alert">双方已完成互评，订单状态：已互评</div>
+        {% elif waiting %}
+            <div class="alert alert-info mt-3" role="alert">你已评价，等待对方评价；订单状态保持「已完成」</div>
+        {% endif %}
+
+        {% if my_review %}
+            <div class="card mt-3">
+                <div class="card-body">
+                    <h6 class="card-title mb-2">你已评价</h6>
+                    <p class="mb-0">{{ my_review.content }}</p>
+                </div>
+            </div>
+        {% else %}
+            <form method="post" action="{% url 'order_review' order.pk %}" class="mt-3">
+                {% csrf_token %}
+                <div class="mb-3">
+                    <label for="id_content" class="form-label">{{ form.content.label }}</label>
+                    {{ form.content }}
+                </div>
+                <div class="d-grid">
+                    <button type="submit" class="btn btn-success">提交评价</button>
+                </div>
+            </form>
+        {% endif %}
+
+        {% if other_review %}
+            <div class="card mt-3">
+                <div class="card-body">
+                    <h6 class="card-title mb-2">对方评价</h6>
+                    <p class="mb-1">{{ other_review.content }}</p>
+                    <small class="text-muted">来自 {{ other_review.reviewer.username }}</small>
+                </div>
+            </div>
+        {% endif %}
+
+        <p class="mt-3 text-center">
+            <a href="{% url 'my_orders' %}">返回我的订单</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

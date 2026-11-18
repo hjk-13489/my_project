@@ -28,6 +28,11 @@
                         <div class="mt-2">
                             <span class="me-3">成交价格：¥{{ order.price }}</span>
                             <span>订单编号：#{{ order.pk }}</span>
+                            {% if order.status == 'completed' or order.status == 'reviewed' %}
+                                <a href="{% url 'order_review' order.pk %}" class="btn btn-sm btn-outline-primary ms-2">
+                                    {% if order.status == 'completed' %}去评价{% else %}查看评价{% endif %}
+                                </a>
+                            {% endif %}
                         </div>
                         <small class="text-muted d-block mt-1">下单时间：{{ order.created_at|date:'Y-m-d H:i' }}</small>
                     </li>
