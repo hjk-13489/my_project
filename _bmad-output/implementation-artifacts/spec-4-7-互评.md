@@ -125,6 +125,13 @@ context: []
 - **low（拒）** — `ReviewForm.content` 无 `max_length`（边界层重复发现）：同前，拒绝。
 - **medium** — 闭环成功态展示无测试（验证缺口层发现）：与前述“双方评价齐备后 GET 无测试”同根因，合并为一组。
 
+### 第二轮审查（2026-11-19，full 模式，baseline 1201082 → 7db40ab）
+
+- 审查层：Edge Case Hunter、Acceptance Auditor（Blind Hunter / Verification Gap 由配置禁用）。验收审计 0 条实质发现；边界猎手 3 条候选经逐条核实全部拒绝，本轮为 clean review。
+- **false** — 非当事人 reviewer 被 `reviewer_is_buyer`/`reviewee` 静默误标为卖家：前置条件应用路径不可达。唯一创建点 `orders/views.py:194` 强制 `reviewer=request.user`，且订单经 `Q(buyer)|Q(product__owner)` 过滤、非当事人 404（测试 7/11 覆盖）；只有绕过视图直接写库才能构造。
+- **false** — 两条评价非买卖双方却触发 `mark_reviewed()`：前置条件不可达。唯一创建点 + `unique_together(order, reviewer)` + 当事人过滤，使两条评价必然来自 buyer 与 seller 各一条（buyer==seller 时唯一约束使其永远到不了 2）。
+- **low（拒）** — 非 `completed` 订单的 GET 评价页仍渲染可提交表单（无 status gate）：后果真实（提交被 `locked.status != 'completed'` 拒并 200 重渲染），但规格 I/O 矩阵明确要求该行为，入口链接已用「去评价/查看评价」区分；修复需加视图+模板分支，按规则 33 拒绝。
+
 ## Verification
 
 **Commands:**

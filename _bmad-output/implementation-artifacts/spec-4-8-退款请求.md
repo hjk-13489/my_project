@@ -124,6 +124,20 @@ baseline_commit: 82fa9d8f30bdcb7e951c094105f2009efec4ee53
 
 Verification Gap 层独立追踪全部行为变更（端点/buyer 与 paid 门控/原因校验/事务回滚/落库/入口门控/PRG 徽章）均有正常运行且断言会失败的测试，未发现 gap。无 loopback，冻结 intent 未被改动。
 
+### 复审记录（2026-11-19，配置：Edge Case Hunter + Acceptance Auditor）
+
+对 story 4.8 进行独立复审（fresh context）。当前配置下 Blind Hunter / Verification Gap 两层 instruction 为空被禁用，活跃层为 Edge Case Hunter 与 Acceptance Auditor。共 5 条发现，逐条核实后全部驳回，无 intent_gap、无 bad_spec、无 patch、无 defer，`review_loop_iteration` 保持 0。裁决均在忽略子代理自带严重度后、依据对实际代码与 diff 的独立核实作出。
+
+| # | 层 | 发现 | 裁决 | 证据 / 理由 |
+|---|----|------|------|------|
+| R1 | ECH | 非 paid 订单提交空原因时先触发「原因必填」而非状态拒绝提示 | `reject/low` | 非 paid GET 页不渲染表单（`can_refund=False`），仅 crafted POST 可达；即便如此仍返回真实拒绝、状态与记录不变。修复需加分支，超出直接修正。同首轮 #10。 |
+| R2 | ECH | `reason` 无 `max_length`，可接受任意长文本 | `reject/low` | 与 `ReviewForm.content` 范式一致，spec 未要求长度上限；修复需改 form + model + 新增迁移，超出直接修正。同首轮 #5/#11。 |
+| R3 | AA | 详情页退款入口测试仅验证 paid 与 reviewed 两种状态 | `reject/false` | 误读：`tests.py:1777-1778` 明确循环覆盖全部 7 种非 paid 状态（diff 407-408 行同），AC「其余任一状态均不显示」已被完整验证。 |
+| R4 | AA | HEAD 方法放行无对应测试 | `reject/low` | `test_unsafe_methods_405` 覆盖 put/delete；HEAD 由 Django 按 GET 处理、装饰器配置正确（`views.py:237`）。验证缺口非行为缺陷，修复需新增测试。同首轮 #9。 |
+| R5 | AA | 写操作测试未启用 CSRF 校验 | `reject/low` | 模板含 csrf_token（`order_refund.html:31`），生产路径受中间件保护；全项目测试范式一致，新增 `enforce_csrf_checks` 属新增基建。同首轮 #9。 |
+
+结论：本轮复审与首轮裁决一致——无需要修复、决策或延期的代码问题。
+
 ## Verification
 
 **Commands:**
