@@ -6,8 +6,8 @@ from django.views.decorators.http import require_POST, require_http_methods, req
 
 from listings.models import Product
 
-from .forms import OrderCreateForm, ReviewForm
-from .models import InvalidTransition, Order, Review
+from .forms import OrderCreateForm, RefundRequestForm, ReviewForm
+from .models import InvalidTransition, Order, RefundRequest, Review
 
 # 已收尾状态：这些状态不再占用「同一买家 + 同一商品」的下单名额。
 CLOSED_STATUSES = ('completed', 'reviewed', 'refunded', 'refund_failed')
@@ -15,6 +15,10 @@ CLOSED_STATUSES = ('completed', 'reviewed', 'refunded', 'refund_failed')
 # 4.7 评价拒绝提示：视图层统一中文文案，模板直接渲染 form 的非字段错误。
 REVIEW_STATUS_ERROR = '评价被拒绝：只有「已完成」的订单可以评价'
 REVIEW_DUPLICATE_ERROR = '评价被拒绝：你已评价过该订单，请勿重复提交'
+
+# 4.8 退款拒绝提示：非 paid 订单、非法/并发流转共用同一中文文案，
+# 经 form.add_error 回到退款页表单，由模板的 alert-danger 呈现。
+REFUND_STATUS_ERROR = '退款被拒绝：只有「已支付/待交付」的订单可以申请退款'
 
 
 # @login_required 外层：未登录 GET/POST 优先 302 到登录页（带 next）。
@@ -224,4 +228,65 @@ def order_review(request, pk):
         'other_review': order.reviews.exclude(reviewer=request.user).first(),
         'waiting': my_review is not None and not both_reviewed,
         'both_reviewed': both_reviewed,
+    })
+
+
+# 4.8 退款申请：仅 buyer 本人、仅 paid 可提交。@login_required 外层使匿名请求
+# 先 302 到登录页；内层显式放行 GET/HEAD（展示）与 POST（提交），其余方法 405。
+@login_required
+@require_http_methods(['GET', 'HEAD', 'POST'])
+def order_refund(request, pk):
+    """退款申请页：仅 buyer 本人、仅 paid 可发起退款。
+
+    GET 展示原因表单（非 paid 仅显示拒绝提示、不渲染表单）；POST 在同一事务内
+    取锁订单、校验 paid、落 RefundRequest 原因，再经既有 Order.request_refund()
+    完成 paid → dispute。原因必填由 RefundRequestForm 服务端校验；非法/重复/
+    陈旧实例经 form.add_error 回到本页 200 重渲染并 refresh_from_db 反映库内
+    真实状态。成功 PRG 回订单详情，由状态徽章呈现「纠纷」。
+    """
+    order = get_object_or_404(Order, pk=pk, buyer=request.user)
+    refund_error = None
+
+    if request.method == 'POST':
+        form = RefundRequestForm(request.POST)
+        submitted = False
+        if form.is_valid():
+            try:
+                with transaction.atomic():
+                    # 取单、校验与落库处于同一事务；锁订单行串行化同一订单上的
+                    # 并发退款提交，任一步失败整体回滚，不留孤立原因记录。
+                    locked = get_object_or_404(
+                        Order.objects.filter(buyer=request.user).select_for_update(),
+                        pk=pk,
+                    )
+                    if locked.status != 'paid':
+                        form.add_error(None, REFUND_STATUS_ERROR)
+                    else:
+                        RefundRequest.objects.create(
+                            order=locked,
+                            reason=form.cleaned_data['reason'],
+                        )
+                        # 状态流转只经既有模型层方法，视图不直接写 order.status。
+                        locked.request_refund()
+                        submitted = True
+            except InvalidTransition:
+                # 并发下订单已被推进（如已确认收货）：事务整体回滚、原因不落库，
+                # 按同一状态拒绝路径提示；重读库内真实状态供徽章呈现。
+                form.add_error(None, REFUND_STATUS_ERROR)
+            if submitted:
+                return redirect('order_detail', pk=pk)
+        # 失败重渲染：刷新库内真实状态，使徽章与提示不显示陈旧状态。
+        order.refresh_from_db()
+    else:
+        form = RefundRequestForm()
+        if order.status != 'paid':
+            # GET 非 paid：单独传拒绝提示，不渲染可提交表单；未绑定表单不能
+            # add_error（Django 5.2 未绑定表单没有 cleaned_data）。
+            refund_error = REFUND_STATUS_ERROR
+
+    return render(request, 'orders/order_refund.html', {
+        'order': order,
+        'form': form,
+        'can_refund': order.status == 'paid',
+        'refund_error': refund_error,
     })

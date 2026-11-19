@@ -33,3 +33,19 @@ class ReviewForm(forms.Form):
             'required': '评价内容不能为空',
         },
     )
+
+
+class RefundRequestForm(forms.Form):
+    """退款申请表单：只暴露退款原因；订单与买家由服务端从登录用户与订单推导。"""
+
+    reason = forms.CharField(
+        label='退款原因',
+        widget=forms.Textarea(attrs={
+            'class': 'form-control',
+            'rows': 5,
+            'placeholder': '请说明退款原因（如：商品与描述不符）',
+        }),
+        error_messages={
+            'required': '退款原因不能为空',
+        },
+    )

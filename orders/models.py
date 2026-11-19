@@ -162,3 +162,24 @@ class Review(models.Model):
     def reviewee(self):
         """被评人：评价人是买家则被评人为卖家，评价人是卖家则被评人为买家。"""
         return self.order.product.owner if self.reviewer_is_buyer else self.order.buyer
+
+
+class RefundRequest(models.Model):
+    """退款请求：挂在订单上，存买家提交的原因，供后续管理员裁决读取。"""
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name='refund_requests',
+        verbose_name='订单',
+    )
+    reason = models.TextField(verbose_name='退款原因')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='申请时间')
+
+    class Meta:
+        verbose_name = '退款请求'
+        verbose_name_plural = '退款请求'
+        ordering = ('-created_at',)
+
+    def __str__(self):
+        return f'订单 #{self.order_id} 的退款请求'

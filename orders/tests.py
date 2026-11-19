@@ -10,9 +10,11 @@ from django.utils import timezone
 from accounts.models import User
 from accounts.views import PROFILE_ORDERS_SUMMARY_LIMIT
 from listings.models import Product
-from orders.forms import OrderCreateForm, ReviewForm
-from orders.models import InvalidTransition, Order, Review
-from orders.views import REVIEW_DUPLICATE_ERROR, REVIEW_STATUS_ERROR
+from orders.forms import OrderCreateForm, RefundRequestForm, ReviewForm
+from orders.models import InvalidTransition, Order, RefundRequest, Review
+from orders.views import (
+    REFUND_STATUS_ERROR, REVIEW_DUPLICATE_ERROR, REVIEW_STATUS_ERROR,
+)
 
 
 class OrderStateMachineTests(TestCase):
@@ -1656,3 +1658,281 @@ class OrderReviewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, '双方已完成互评')
         self.assertContains(response, '卖家评价正文')
+
+
+class RefundRequestModelTests(TestCase):
+    """4.8 RefundRequest：落库字段、关系与级联，供后续裁决读取。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2026201', username='卖家', password='test123456'
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2026202', username='买家', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材', status='approved',
+        )
+        cls.order = Order.objects.create(
+            buyer=cls.buyer, product=cls.product,
+            price=cls.product.price, status='paid',
+        )
+
+    def test_create_persists_reason_order_and_relation(self):
+        refund = RefundRequest.objects.create(order=self.order, reason='商品与描述不符')
+
+        refund.refresh_from_db()
+        self.assertEqual(refund.reason, '商品与描述不符')
+        self.assertEqual(refund.order, self.order)
+        self.assertIsNotNone(refund.created_at)
+        self.assertEqual(list(self.order.refund_requests.all()), [refund])
+        self.assertIn('退款请求', str(refund))
+
+    def test_order_cascade_deletes_refund_requests(self):
+        refund = RefundRequest.objects.create(order=self.order, reason='货不对板')
+
+        self.order.delete()
+
+        self.assertFalse(RefundRequest.objects.filter(pk=refund.pk).exists())
+
+
+class OrderRefundViewTests(TestCase):
+    """4.8 退款申请：HTTP 层覆盖 I/O 矩阵全部场景。"""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.seller = User.objects.create_user(
+            student_id='2027201', username='卖家', password='test123456'
+        )
+        cls.buyer = User.objects.create_user(
+            student_id='2027202', username='买家', password='test123456'
+        )
+        cls.other = User.objects.create_user(
+            student_id='2027203', username='路人', password='test123456'
+        )
+        cls.product = Product.objects.create(
+            owner=cls.seller, title='线性代数教材', description='x',
+            price=Decimal('30.00'), condition='良好', category='教材', status='approved',
+        )
+
+    # ---------- helpers ----------
+    def _make_order(self, status='paid'):
+        return Order.objects.create(
+            buyer=self.buyer, product=self.product,
+            price=self.product.price, status=status,
+        )
+
+    def _refund_url(self, order):
+        return reverse('order_refund', kwargs={'pk': order.pk})
+
+    def _detail_url(self, order):
+        return reverse('order_detail', kwargs={'pk': order.pk})
+
+    def _login(self, user):
+        self.client.login(username=user.student_id, password='test123456')
+
+    # 1 正常退款：302 回详情、status=dispute、原因与订单落库
+    def test_refund_success_transitions_persists_reason_and_redirects(self):
+        order = self._make_order()
+        self._login(self.buyer)
+
+        response = self.client.post(self._refund_url(order), {'reason': '货不对板'})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.url, self._detail_url(order))
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'dispute')
+        refunds = RefundRequest.objects.filter(order=order)
+        self.assertEqual(refunds.count(), 1)
+        self.assertEqual(refunds.get().reason, '货不对板')
+
+        detail = self.client.get(self._detail_url(order))
+        self.assertContains(detail, '纠纷')
+        self.assertNotContains(detail, self._refund_url(order))
+
+    # 2 原因必填：空/纯空白 → 200 表单错误，状态与记录不变
+    def test_empty_or_blank_reason_rejected(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        for reason in ('', '   ', '\t\n'):
+            with self.subTest(reason=repr(reason)):
+                response = self.client.post(self._refund_url(order), {'reason': reason})
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, '退款原因不能为空')
+                self.assertEqual(RefundRequest.objects.count(), 0)
+                order.refresh_from_db()
+                self.assertEqual(order.status, 'paid')
+
+    # 3 入口可见性：仅 paid 详情显示退款链接
+    def test_refund_link_only_shown_when_paid(self):
+        self._login(self.buyer)
+        paid = self._make_order(status='paid')
+        detail = self.client.get(self._detail_url(paid))
+        self.assertEqual(detail.status_code, 200)
+        self.assertContains(detail, self._refund_url(paid))
+        self.assertContains(detail, '申请退款')
+
+        for status in ('pending_payment', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            with self.subTest(status=status):
+                detail = self.client.get(self._detail_url(order))
+                self.assertEqual(detail.status_code, 200)
+                self.assertNotContains(detail, self._refund_url(order))
+                self.assertContains(detail, order.get_status_display())
+
+    # 4 独立页 GET：paid 展示含原因 textarea 的空表单
+    def test_get_shows_form_on_paid_order(self):
+        order = self._make_order()
+        self._login(self.buyer)
+
+        response = self.client.get(self._refund_url(order))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, 'orders/order_refund.html')
+        self.assertContains(response, '申请退款')
+        self.assertContains(response, self.product.title)
+        self.assertContains(response, 'name="reason"')
+        self.assertContains(response, '退款原因')
+        self.assertContains(response, '提交退款申请')
+        self.assertIn('form', response.context)
+        self.assertEqual(list(RefundRequestForm().fields), ['reason'])
+        self.assertTrue(response.context['can_refund'])
+
+    # 5 GET 非 paid：200 仅拒绝提示，无可提交表单
+    def test_get_non_paid_shows_rejection_without_form(self):
+        self._login(self.buyer)
+        for status in ('pending_payment', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            with self.subTest(status=status):
+                response = self.client.get(self._refund_url(order))
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, REFUND_STATUS_ERROR)
+                self.assertContains(response, order.get_status_display())
+                self.assertNotContains(response, 'name="reason"')
+                self.assertFalse(response.context['can_refund'])
+
+    # 6 非安全方法：PUT/DELETE → 405，状态不变
+    def test_unsafe_methods_405(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        for method in ('put', 'delete'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self._refund_url(order))
+                self.assertEqual(response.status_code, 405)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertEqual(RefundRequest.objects.count(), 0)
+
+    # 7 非 paid 提交：200 中文拒绝、状态与记录不变
+    def test_non_paid_status_rejected(self):
+        self._login(self.buyer)
+        for status in ('pending_payment', 'received', 'completed', 'reviewed',
+                       'dispute', 'refunded', 'refund_failed'):
+            order = self._make_order(status=status)
+            with self.subTest(status=status):
+                response = self.client.post(self._refund_url(order), {'reason': '货不对板'})
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'alert-danger')
+                self.assertContains(response, REFUND_STATUS_ERROR)
+                order.refresh_from_db()
+                self.assertEqual(order.status, status)
+        self.assertEqual(RefundRequest.objects.count(), 0)
+
+    # 8 未登录：GET/POST 302 跳登录页并带 next
+    def test_anonymous_redirected_to_login(self):
+        order = self._make_order()
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    self._refund_url(order), {'reason': '货不对板'}
+                )
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.url.startswith('/login/'))
+                self.assertIn('next=', response.url)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertEqual(RefundRequest.objects.count(), 0)
+
+    # 9 越权/不存在：非 buyer 与不存在 pk 一律 404
+    def test_other_user_and_nonexistent_order_404(self):
+        order = self._make_order()
+        self._login(self.other)
+        for method in ('get', 'post'):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(
+                    self._refund_url(order), {'reason': '货不对板'}
+                )
+                self.assertEqual(response.status_code, 404)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'paid')
+        self.assertEqual(RefundRequest.objects.count(), 0)
+
+        self._login(self.buyer)
+        url = reverse('order_refund', kwargs={'pk': 999999})
+        self.assertEqual(self.client.get(url).status_code, 404)
+        self.assertEqual(self.client.post(url, {'reason': 'x'}).status_code, 404)
+
+    # 10 伪造字段：status/buyer/order 被忽略，仅依状态机与登录用户流转
+    def test_forged_post_fields_ignored(self):
+        order = self._make_order()
+        other_order = self._make_order()
+        self._login(self.buyer)
+
+        response = self.client.post(self._refund_url(order), {
+            'reason': '真实原因',
+            'status': 'refunded',
+            'buyer': self.other.pk,
+            'order': other_order.pk,
+        })
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'dispute')
+        self.assertEqual(order.buyer, self.buyer)
+        refund = RefundRequest.objects.get()
+        self.assertEqual(refund.order, order)
+        self.assertEqual(refund.reason, '真实原因')
+        self.assertEqual(RefundRequest.objects.filter(order=other_order).count(), 0)
+
+    # 11 连续两次提交：仅一次成功，第二次 200 拒绝且无第二条记录
+    def test_double_submit_only_once(self):
+        order = self._make_order()
+        self._login(self.buyer)
+
+        first = self.client.post(self._refund_url(order), {'reason': '货不对板'})
+        self.assertEqual(first.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'dispute')
+
+        second = self.client.post(self._refund_url(order), {'reason': '再申请一次'})
+        self.assertEqual(second.status_code, 200)
+        self.assertContains(second, REFUND_STATUS_ERROR)
+        refunds = RefundRequest.objects.filter(order=order)
+        self.assertEqual(refunds.count(), 1)
+        self.assertEqual(refunds.get().reason, '货不对板')
+        order.refresh_from_db()
+        self.assertEqual(order.status, 'dispute')
+
+    # 12 并发/陈旧实例：库内已被推进，条件更新挡住二次流转，事务回滚不留原因
+    def test_concurrent_stale_instance_rejected_visibly(self):
+        order = self._make_order()
+        self._login(self.buyer)
+        # 模拟并发请求先把库内状态推进到 dispute（不影响内存中 order 的 status）
+        Order.objects.filter(pk=order.pk).update(status='dispute')
+
+        def stale_lookup(model, *args, **kwargs):
+            return order  # 陈旧实例：status 仍为 paid
+
+        with mock.patch('orders.views.get_object_or_404', side_effect=stale_lookup):
+            response = self.client.post(self._refund_url(order), {'reason': '货不对板'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'alert-danger')
+        self.assertContains(response, REFUND_STATUS_ERROR)
+        self.assertContains(response, '纠纷')  # 徽章反映库内真实状态
+        self.assertEqual(Order.objects.get(pk=order.pk).status, 'dispute')
+        self.assertEqual(RefundRequest.objects.filter(order=order).count(), 0)
